@@ -119,13 +119,13 @@ class Exp_Main(Exp_Basic):
                     extra_input['mask_true'] = mask_true
 
                 # encoder - decoder
-                outputs = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
+                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
-                outputs[0] = outputs[0][:, -self.args.pred_len:, ..., f_dim:]
+                outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
 
-                loss = criterion(outputs, batch_y, mask)
+                loss = criterion((outputs, aux_loss), batch_y, mask)
                 total_loss.append(loss.item())
         total_loss = np.average(total_loss)
         self.model.train()
@@ -208,12 +208,12 @@ class Exp_Main(Exp_Basic):
                     extra_input['mask_true'] = mask_true
 
                 # encoder - decoder
-                outputs = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
+                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
                 f_dim = -1 if self.args.features == 'MS' else 0
-                outputs[0] = outputs[0][:, -self.args.pred_len:, ..., f_dim:]
+                outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
 
-                loss = criterion(outputs, batch_y, mask)
+                loss = criterion((outputs, aux_loss), batch_y, mask)
                 train_loss.append(loss.item())
 
                 train_track(i, epoch, loss)
@@ -303,10 +303,10 @@ class Exp_Main(Exp_Basic):
                     extra_input['mask_true'] = mask_true
 
                 # encoder - decoder
-                outputs = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
+                outputs, _ = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[0][:, -self.args.pred_len:, ..., f_dim:]
+                outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
