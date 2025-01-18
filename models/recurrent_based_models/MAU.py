@@ -219,7 +219,7 @@ class Model(nn.Module):
         width = configs.width // configs.patch_size // self.sr_size
         for i in range(self.num_layers):
             in_channel = self.d_patch if i == 0 else self.num_hidden
-            cell_list.append(MAUCell(in_channel, self.num_hidden, height, width, self.filter_size, self.stride, self.layer_norm, self.tau, self.cell_mode))
+            cell_list.append(MAUCell(in_channel, self.num_hidden, height, width, self.filter_size, self.stride, self.tau, self.cell_mode))
         self.cell_list = nn.ModuleList(cell_list)
 
         # Encoder
