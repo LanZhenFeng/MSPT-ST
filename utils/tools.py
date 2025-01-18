@@ -114,7 +114,7 @@ def visual(true, preds=None, name='./pic/test.pdf'):
     plt.savefig(name, bbox_inches='tight')
 
 
-def visual_ST(true, preds=None, name='./pic/test.pdf'):
+def visual_st(true, preds=None, name='./pic/test.pdf'):
     """
     Results visualization for spatio-temporal data
     true: [T, H, W] T is the time steps
