@@ -102,7 +102,7 @@ class Exp_Main(Exp_Basic):
                 if self.args.curriculum_learning_strategy == "rss":
                     mask_true = np.zeros((self.args.batch_size,
                                           self.args.seq_len + self.args.pred_len - 1 - 1,
-                                          self.args.width // self.args.patch_size,
+                                          self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
                                           self.args.patch_size ** 2 * self.args.enc_in))
                     mask_true[:, :self.args.seq_len - 1] = 1.
@@ -111,7 +111,7 @@ class Exp_Main(Exp_Basic):
                 elif self.args.curriculum_learning_strategy == "ss":
                     mask_true = np.zeros((self.args.batch_size,
                                           self.args.pred_len - 1,
-                                          self.args.width // self.args.patch_size,
+                                          self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
                                           self.args.patch_size ** 2 * self.args.enc_in))
                     mask_true[:, :self.args.seq_len - 1] = 1.
@@ -286,7 +286,7 @@ class Exp_Main(Exp_Basic):
                 if self.args.curriculum_learning_strategy == "rss":
                     mask_true = np.zeros((1,
                                           self.args.seq_len + self.args.pred_len - 1 - 1,
-                                          self.args.width // self.args.patch_size,
+                                          self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
                                           self.args.patch_size ** 2 * self.args.enc_in))
                     mask_true[:, :self.args.seq_len - 1] = 1.
@@ -295,7 +295,7 @@ class Exp_Main(Exp_Basic):
                 elif self.args.curriculum_learning_strategy == "ss":
                     mask_true = np.zeros((1,
                                           self.args.pred_len - 1,
-                                          self.args.width // self.args.patch_size,
+                                          self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
                                           self.args.patch_size ** 2 * self.args.enc_in))
                     mask_true[:, :self.args.seq_len - 1] = 1.

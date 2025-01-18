@@ -103,6 +103,8 @@ class Model(nn.Module):
             if self.cls in ['rss', 'ss']:
                 raise ValueError("mask_true is required for RSS and SS")
             mask_true = torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4], device=x_enc.device)
+        
+        mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
 
         if kwargs.get('batch_y', None) is not None:
             batch_y = kwargs['batch_y']

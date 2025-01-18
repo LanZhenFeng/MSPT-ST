@@ -182,10 +182,10 @@ def reserve_schedule_sampling_exp(itr, args):
         (args.batch_size, args.pred_len - 1))
     true_token = (random_flip < eta)
 
-    ones = np.ones((args.width // args.patch_size,
+    ones = np.ones((args.height // args.patch_size,
                     args.width // args.patch_size,
                     args.patch_size ** 2 * args.enc_in))
-    zeros = np.zeros((args.width // args.patch_size,
+    zeros = np.zeros((args.height // args.patch_size,
                       args.width // args.patch_size,
                       args.patch_size ** 2 * args.enc_in))
 
@@ -207,7 +207,7 @@ def reserve_schedule_sampling_exp(itr, args):
     real_input_flag = np.reshape(real_input_flag,
                                  (args.batch_size,
                                   args.seq_len + args.pred_len - 2,
-                                  args.width // args.patch_size,
+                                  args.height // args.patch_size,
                                   args.width // args.patch_size,
                                   args.patch_size ** 2 * args.enc_in))
     return real_input_flag
@@ -216,7 +216,7 @@ def reserve_schedule_sampling_exp(itr, args):
 def schedule_sampling(eta, itr, args):
     zeros = np.zeros((args.batch_size,
                       args.pred_len - 1,
-                      args.width // args.patch_size,
+                      args.height // args.patch_size,
                       args.width // args.patch_size,
                       args.patch_size ** 2 * args.enc_in))
     if not args.scheduled_sampling:
@@ -229,10 +229,10 @@ def schedule_sampling(eta, itr, args):
     random_flip = np.random.random_sample(
         (args.batch_size, args.pred_len - 1))
     true_token = (random_flip < eta)
-    ones = np.ones((args.width // args.patch_size,
+    ones = np.ones((args.height // args.patch_size,
                     args.width // args.patch_size,
                     args.patch_size ** 2 * args.enc_in))
-    zeros = np.zeros((args.width // args.patch_size,
+    zeros = np.zeros((args.height // args.patch_size,
                       args.width // args.patch_size,
                       args.patch_size ** 2 * args.enc_in))
     real_input_flag = []
@@ -246,7 +246,7 @@ def schedule_sampling(eta, itr, args):
     real_input_flag = np.reshape(real_input_flag,
                                  (args.batch_size,
                                   args.pred_len - 1,
-                                  args.width // args.patch_size,
+                                  args.height // args.patch_size,
                                   args.width // args.patch_size,
                                   args.patch_size ** 2 * args.enc_in))
     return eta, real_input_flag
