@@ -1,7 +1,7 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from utils.tools import EarlyStopping, TrainTracking, adjust_learning_rate, visual, visual_ST, reserve_schedule_sampling_exp, schedule_sampling
-from utils.metrics import metric
+from utils.tools import EarlyStopping, TrainTracking, adjust_learning_rate, visual, visual_st, reserve_schedule_sampling_exp, schedule_sampling
+from utils.metrics import metric, metric_st
 from utils.loss import MaskedMSELoss, MaskedMAELoss, MaskedMSEMAELoss
 import torch
 import torch.nn as nn
@@ -86,7 +86,7 @@ class Exp_Main(Exp_Basic):
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, mask) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float()
+                batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -123,7 +123,7 @@ class Exp_Main(Exp_Basic):
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs[0] = outputs[0][:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
 
                 loss = criterion(outputs, batch_y, mask)
                 total_loss.append(loss.item())
@@ -139,20 +139,6 @@ class Exp_Main(Exp_Basic):
         self.model_save_path = os.path.join(self.args.model_save_path, setting)
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
         self.test_results_save_path = os.path.join(self.args.test_results_save_path, setting)
-
-        # save args
-        args_dict = vars(self.args)
-        with open(os.path.join(self.model_save_path, 'config.py'), 'w') as f:
-            for k, v in args_dict.items():
-                f.write(str(k) + ' = ' + str(v) + '\n')
-        
-        with open(os.path.join(self.results_save_path, 'config.py'), 'w') as f:
-            for k, v in args_dict.items():
-                f.write(str(k) + ' = ' + str(v) + '\n')
-        
-        with open(os.path.join(self.test_results_save_path, 'config.py'), 'w') as f:
-            for k, v in args_dict.items():
-                f.write(str(k) + ' = ' + str(v) + '\n')
         
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
 
@@ -167,6 +153,20 @@ class Exp_Main(Exp_Basic):
         test_criterion = self._select_criterion()
         
         self._makedirs()
+
+        # save args
+        args_dict = vars(self.args)
+        with open(os.path.join(self.model_save_path, 'config.txt'), 'w') as f:
+            for k, v in args_dict.items():
+                f.write(str(k) + ' = ' + str(v) + '\n')
+        
+        with open(os.path.join(self.results_save_path, 'config.txt'), 'w') as f:
+            for k, v in args_dict.items():
+                f.write(str(k) + ' = ' + str(v) + '\n')
+        
+        with open(os.path.join(self.test_results_save_path, 'config.txt'), 'w') as f:
+            for k, v in args_dict.items():
+                f.write(str(k) + ' = ' + str(v) + '\n')
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -185,7 +185,7 @@ class Exp_Main(Exp_Basic):
                 model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float()
+                batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -211,7 +211,7 @@ class Exp_Main(Exp_Basic):
                 outputs = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs[0] = outputs[0][:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
 
                 loss = criterion(outputs, batch_y, mask)
                 train_loss.append(loss.item())
@@ -269,7 +269,7 @@ class Exp_Main(Exp_Basic):
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, mask) in enumerate(test_loader):
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float()
+                batch_y = batch_y.float().to(self.device)
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
@@ -307,7 +307,7 @@ class Exp_Main(Exp_Basic):
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[0][:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
@@ -331,7 +331,7 @@ class Exp_Main(Exp_Basic):
                     # pd = np.concatenate((input[0, -365:, -1], pred[0, :, -1]), axis=0)
                     gt = true[0, :, ..., -1]
                     pd = pred[0, :, ..., -1]
-                    visual_ST(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
+                    visual_st(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -345,19 +345,6 @@ class Exp_Main(Exp_Basic):
         f = open("result_sstp_st_forecast.txt", 'a')
         f.write(setting + "  \n")
         f.write('mse:{}, mae:{}, rmse:{}, pnsr:{}, ssim:{}'.format(mse, mae, rmse, pnsr, ssim))
-        f.write('\n')
-        f.write('\n')
-        f.close()
-
-
-        mae, mse, rmse, mape, mspe, rse, corr, r2_score, acc = metric(preds, trues)
-        print('mse:{}, mae:{}, rmse:{}, mape:{}, mspe:{}, rse:{}, r2_score:{}, acc:{}'.format(mse, mae, rmse, mape, mspe, rse, r2_score, acc))
-        print('corr:', corr)
-        f = open("result_sstp_forecast.txt", 'a')
-        f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}, rmse:{}, mape:{}, mspe:{}, rse:{}, r2_score:{}, acc:{}'.format(mse, mae, rmse, mape, mspe, rse, r2_score, acc))
-        f.write('\n')
-        f.write('corr:{}'.format(corr))
         f.write('\n')
         f.write('\n')
         f.close()

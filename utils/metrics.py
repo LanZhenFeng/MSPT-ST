@@ -121,3 +121,12 @@ def SSIM(pred, true, **kwargs):
     ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
                                                             (sigma1_sq + sigma2_sq + C2))
     return ssim_map.mean()
+
+
+def metric_st(pred, true, mask):
+    masked_mse = Masked_MSE_ST(pred, true, mask)
+    masked_rmse = Masked_RMSE_ST(pred, true, mask)
+    masked_mae = Masked_MAE_ST(pred, true, mask)
+    psnr = PSNR(pred, true)
+    ssim = SSIM(pred, true)
+    return masked_mse, masked_mae, masked_rmse, psnr, ssim

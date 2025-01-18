@@ -1,6 +1,6 @@
 import os
 import torch
-from models import MSPT, MSPT_ST, ConvLSTM
+from models import MSPT, MSPT_ST, ConvLSTM, E3DLSTM, MAU, MIM, PhyDNet, PredRNN, PredRNNPP, PredRNNv2, SwinLSTM_B, SwinLSTM_D, SimVP, TAU
 
 
 class Exp_Basic(object):
@@ -10,6 +10,17 @@ class Exp_Basic(object):
             'MSPT': MSPT,
             'MSPT_S': MSPT_ST,
             'ConvLSTM': ConvLSTM,
+            'E3DLSTM': E3DLSTM,
+            'MAU': MAU,
+            'MIM': MIM,
+            'PhyDNet': PhyDNet,
+            'PredRNN': PredRNN,
+            'PredRNNPP': PredRNNPP,
+            'PredRNNv2': PredRNNv2,
+            'SwinLSTM_B': SwinLSTM_B,
+            'SwinLSTM_D': SwinLSTM_D,
+            'SimVP': SimVP,
+            'TAU': TAU
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

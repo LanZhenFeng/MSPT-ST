@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 
 data_dict = {
     'temporal': Dataset_Temporal,
-    'sptiotemporal': Dataset_SpatioTemporal,
+    'spatiotemporal': Dataset_SpatioTemporal,
 }
 
 
