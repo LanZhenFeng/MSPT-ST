@@ -93,6 +93,7 @@ class Model(nn.Module):
             S_pre[i].append(S_t)
             T_t[i], S_t = self.cell_list[i](T_t[i], S_t, t_att, s_att)
             T_pre[i].append(T_t[i])
+        out = S_t
         for i in range(len(self.decoders)):
             out = self.decoders[i](out)
             if self.model_mode == 'recall':
