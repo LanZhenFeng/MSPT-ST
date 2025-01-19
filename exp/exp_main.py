@@ -100,7 +100,7 @@ class Exp_Main(Exp_Basic):
                 extra_input = {'batch_y': batch_y}
 
                 if self.args.curriculum_learning_strategy == "rss":
-                    mask_true = np.zeros((self.args.batch_size,
+                    mask_true = np.zeros((batch_x.shape[0],
                                           self.args.seq_len + self.args.pred_len - 1 - 1,
                                           self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
@@ -109,7 +109,7 @@ class Exp_Main(Exp_Basic):
                     mask_true = torch.from_numpy(mask_true).float().to(self.device)
                     extra_input['mask_true'] = mask_true
                 elif self.args.curriculum_learning_strategy == "ss":
-                    mask_true = np.zeros((self.args.batch_size,
+                    mask_true = np.zeros((batch_x.shape[0],
                                           self.args.pred_len - 1,
                                           self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
@@ -284,7 +284,7 @@ class Exp_Main(Exp_Basic):
                 extra_input = {'batch_y': batch_y}
 
                 if self.args.curriculum_learning_strategy == "rss":
-                    mask_true = np.zeros((1,
+                    mask_true = np.zeros((batch_x.shape[0],
                                           self.args.seq_len + self.args.pred_len - 1 - 1,
                                           self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
@@ -293,7 +293,7 @@ class Exp_Main(Exp_Basic):
                     mask_true = torch.from_numpy(mask_true).float().to(self.device)
                     extra_input['mask_true'] = mask_true
                 elif self.args.curriculum_learning_strategy == "ss":
-                    mask_true = np.zeros((1,
+                    mask_true = np.zeros((batch_x.shape[0],
                                           self.args.pred_len - 1,
                                           self.args.height // self.args.patch_size,
                                           self.args.width // self.args.patch_size,
@@ -322,16 +322,16 @@ class Exp_Main(Exp_Basic):
                 true = batch_y
                 preds.append(pred)
                 trues.append(true)
-                if i % 20 == 0:
-                    # input = batch_x.detach().cpu().numpy()
-                    # if test_data.scale and self.args.inverse:
-                    #     shape = input.shape
-                    #     input = test_data.inverse_transform(input.squeeze(0)).reshape(shape)
-                    # gt = np.concatenate((input[0, -365:, -1], true[0, :, -1]), axis=0)
-                    # pd = np.concatenate((input[0, -365:, -1], pred[0, :, -1]), axis=0)
-                    gt = true[0, :, ..., -1]
-                    pd = pred[0, :, ..., -1]
-                    visual_st(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
+                # if i % 20 == 0:
+                #     # input = batch_x.detach().cpu().numpy()
+                #     # if test_data.scale and self.args.inverse:
+                #     #     shape = input.shape
+                #     #     input = test_data.inverse_transform(input.squeeze(0)).reshape(shape)
+                #     # gt = np.concatenate((input[0, -365:, -1], true[0, :, -1]), axis=0)
+                #     # pd = np.concatenate((input[0, -365:, -1], pred[0, :, -1]), axis=0)
+                #     gt = true[0, :, ..., -1]
+                #     pd = pred[0, :, ..., -1]
+                #     visual_st(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -340,7 +340,10 @@ class Exp_Main(Exp_Basic):
         trues = trues.reshape(-1, preds.shape[-4], preds.shape[-3], trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
-        mse, mae, rmse, pnsr, ssim = metric(preds, trues, mask.detach().cpu().numpy())
+        mask = mask.detach().cpu().numpy()[:, None, :, :, None]
+        print(mask.shape)
+
+        mse, mae, rmse, pnsr, ssim = metric_st(preds, trues, mask)
         print('mse:{}, mae:{}, rmse:{}, pnsr:{}, ssim:{}'.format(mse, mae, rmse, pnsr, ssim))
         f = open("result_sstp_st_forecast.txt", 'a')
         f.write(setting + "  \n")
@@ -350,8 +353,8 @@ class Exp_Main(Exp_Basic):
         f.close()
 
         np.save(results_save_path + 'metrics.npy', np.array([mse, mae, rmse, pnsr, ssim]))
-        np.save(results_save_path + 'pred.npy', preds)
-        np.save(results_save_path + 'true.npy', trues)
+        np.save(results_save_path + 'pred.npy', preds * mask)
+        np.save(results_save_path + 'true.npy', trues * mask)
 
     def get_model(self):
         return self.model.module if isinstance(self.model, nn.DataParallel) else self.model

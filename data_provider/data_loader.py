@@ -256,7 +256,7 @@ class Dataset_SpatioTemporal(Dataset):
 
     def __read_data__(self):
         self.scaler = StandardScaler()
-        data_raw = np.load(os.path.join(self.root_path, self.data_path), mmap_mode='r')
+        data_raw = np.load(os.path.join(self.root_path, self.data_path), mmap_mode='r')[:1000]
         data_raw = np.nan_to_num(data_raw, nan=0.0)
         mask_ocean = np.load(os.path.join(self.root_path, 'scs_lat_0to24_lon_105to121_maskocean.npy'), mmap_mode='r')
         '''
@@ -326,7 +326,11 @@ class Dataset_SpatioTemporal(Dataset):
 
     def inverse_transform(self, data):
         T, H, W, C = data.shape
+        if C == 1:
+            data = einops.repeat(data, 't h w c -> t h w (repeat c)', repeat=14)
         data = einops.rearrange(data, 't h w c -> (t h w) c')
         data = self.scaler.inverse_transform(data)
         data = einops.rearrange(data, '(t h w) c -> t h w c', t=T, h=H, w=W)
+        if C == 1:
+            data = data[..., -1]
         return data

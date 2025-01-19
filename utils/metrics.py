@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 import torch
 from sklearn.metrics import r2_score
+from skimage.metrics import structural_similarity as cal_ssim
+from skimage.metrics import peak_signal_noise_ratio as cal_psnr
 
 '''
 Metrics for evaluation of temporal forecasting models
@@ -57,33 +59,29 @@ def metric(pred, true):
 '''
 Metrics for evaluation of spatio-temporal forecasting models
 '''
-def MSE_ST(pred, true):
+def MSE_ST(pred, true, spatial_norm=False):
     # pred [B, T, H, W, C], true [B, T, H, W, C]
-    return np.mean((pred - true) ** 2)
+    if not spatial_norm:
+        return np.mean((pred-true)**2, axis=(0, 1)).sum()
+    else:
+        norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+        return np.mean((pred-true)**2 / norm, axis=(0, 1)).sum()
 
-def Masked_MSE_ST(pred, true, mask):
-    # pred [B, T, H, W, C], true [B, T, H, W, C], mask [H, W]
-    mask = mask[None, None, :, :, None]
-    return np.sum((pred - true) ** 2 * mask) / np.sum(mask)
-
-def RMSE_ST(pred, true):
+def RMSE_ST(pred, true, spatial_norm=False):
     # pred [B, T, H, W, C], true [B, T, H, W, C]
-    return np.sqrt(MSE_ST(pred, true))
+    if not spatial_norm:
+        return np.sqrt(np.mean((pred-true)**2, axis=(0, 1)).sum())
+    else:
+        norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+        return np.sqrt(np.mean((pred-true)**2 / norm, axis=(0, 1)).sum())
 
-def Masked_RMSE_ST(pred, true, mask):
-    # pred [B, T, H, W, C], true [B, T, H, W, C], mask [H, W]
-    mask = mask[None, None, :, :, None]
-    return np.sqrt(Masked_MSE_ST(pred, true, mask))
-
-def MAE_ST(pred, true):
+def MAE_ST(pred, true, spatial_norm=False):
     # pred [B, T, H, W, C], true [B, T, H, W, C]
-    return np.mean(np.abs(pred - true))
-
-def Masked_MAE_ST(pred, true, mask):
-    # pred [B, T, H, W, C], true [B, T, H, W, C], mask [H, W]
-    mask = mask[None, None, :, :, None]
-    return np.sum(np.abs(pred - true) * mask) / np.sum(mask)
-
+    if not spatial_norm:
+        return np.mean(np.abs(pred-true), axis=(0, 1)).sum()
+    else:
+        norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+        return np.mean(np.abs(pred-true) / norm, axis=(0, 1)).sum()
 
 def PSNR(pred, true, min_max_norm=True):
     """Peak Signal-to-Noise Ratio.
@@ -100,33 +98,31 @@ def PSNR(pred, true, min_max_norm=True):
             return 20. * np.log10(255. / np.sqrt(mse))  # [-1, 1] normalized by mean and std
 
 
-def SSIM(pred, true, **kwargs):
-    C1 = (0.01 * 255)**2
-    C2 = (0.03 * 255)**2
+def PSNR_ST(pred, true):
+    psnr = 0
+    for i in range(pred.shape[0]):
+        for j in range(pred.shape[1]):
+            # psnr += PSNR(pred[i, j], true[i, j])
+            psnr += cal_psnr(true[i, j].swapaxes(0, 2), pred[i, j].swapaxes(0, 2), data_range=true[i, j].max() - true[i, j].min())
+    return psnr / (pred.shape[0] * pred.shape[1])
 
-    img1 = pred.astype(np.float64)
-    img2 = true.astype(np.float64)
-    kernel = cv2.getGaussianKernel(11, 1.5)
-    window = np.outer(kernel, kernel.transpose())
 
-    mu1 = cv2.filter2D(img1, -1, window)[5:-5, 5:-5]  # valid
-    mu2 = cv2.filter2D(img2, -1, window)[5:-5, 5:-5]
-    mu1_sq = mu1**2
-    mu2_sq = mu2**2
-    mu1_mu2 = mu1 * mu2
-    sigma1_sq = cv2.filter2D(img1**2, -1, window)[5:-5, 5:-5] - mu1_sq
-    sigma2_sq = cv2.filter2D(img2**2, -1, window)[5:-5, 5:-5] - mu2_sq
-    sigma12 = cv2.filter2D(img1 * img2, -1, window)[5:-5, 5:-5] - mu1_mu2
-
-    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) *
-                                                            (sigma1_sq + sigma2_sq + C2))
-    return ssim_map.mean()
+def SSIM(pred, true):
+    # pred [B, T, H, W, C], true [B, T, H, W, C], mask [H, W]
+    ssim = 0
+    for i in range(pred.shape[0]):
+        for j in range(pred.shape[1]):
+            ssim += cal_ssim(pred[i, j].swapaxes(0, 2), true[i, j].swapaxes(0, 2), data_range=true[i, j].max() - true[i, j].min(), channel_axis=0)
+    return ssim / (pred.shape[0] * pred.shape[1])
 
 
 def metric_st(pred, true, mask):
-    masked_mse = Masked_MSE_ST(pred, true, mask)
-    masked_rmse = Masked_RMSE_ST(pred, true, mask)
-    masked_mae = Masked_MAE_ST(pred, true, mask)
-    psnr = PSNR(pred, true)
+    pred = pred * mask
+    true = true * mask
+    print(pred.shape, true.shape)
+    mse = MSE_ST(pred, true, False)
+    mae = MAE_ST(pred, true, False)
+    rmse = RMSE_ST(pred, true, False)
+    psnr = PSNR_ST(pred, true)
     ssim = SSIM(pred, true)
-    return masked_mse, masked_mae, masked_rmse, psnr, ssim
+    return mse, mae, rmse, psnr, ssim

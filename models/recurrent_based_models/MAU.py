@@ -76,29 +76,7 @@ class Model(nn.Module):
             decoders.append(decoder)
         self.decoders = nn.ModuleList(decoders)
 
-        self.conv_last = nn.Conv2d(self.num_hidden, self.d_patch, kernel_size=1, stride=1, padding=0, bias=False)
-
-    def forward_one_time_step(self, x_t, T_t, T_pre, S_pre):
-        frames_feature = x_t
-        frames_feature_encoded = []
-        for i in range(len(self.encoders)):
-            frames_feature = self.encoders[i](frames_feature)
-            frames_feature_encoded.append(frames_feature)
-        S_t = frames_feature
-        for i in range(self.num_layers):
-            t_att = T_pre[i][-self.tau:]
-            t_att = torch.stack(t_att, dim=0)
-            s_att = S_pre[i][-self.tau:]
-            s_att = torch.stack(s_att, dim=0)
-            S_pre[i].append(S_t)
-            T_t[i], S_t = self.cell_list[i](T_t[i], S_t, t_att, s_att)
-            T_pre[i].append(T_t[i])
-        out = S_t
-        for i in range(len(self.decoders)):
-            out = self.decoders[i](out)
-            if self.model_mode == 'recall':
-                out = out + frames_feature_encoded[-2 - i]
-        return out
+        self.conv_last = nn.Conv2d(self.num_hidden, self.d_patch, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
@@ -158,7 +136,25 @@ class Model(nn.Module):
                 else:
                     x_t = x_gen
 
-            out = self.forward_one_time_step(x_t, T_t, T_pre, S_pre)
+            frames_feature = x_t
+            frames_feature_encoded = []
+            for i in range(len(self.encoders)):
+                frames_feature = self.encoders[i](frames_feature)
+                frames_feature_encoded.append(frames_feature)
+            S_t = frames_feature
+            for i in range(self.num_layers):
+                t_att = T_pre[i][-self.tau:]
+                t_att = torch.stack(t_att, dim=0)
+                s_att = S_pre[i][-self.tau:]
+                s_att = torch.stack(s_att, dim=0)
+                S_pre[i].append(S_t)
+                T_t[i], S_t = self.cell_list[i](T_t[i], S_t, t_att, s_att)
+                T_pre[i].append(T_t[i])
+            out = S_t
+            for i in range(len(self.decoders)):
+                out = self.decoders[i](out)
+                if self.model_mode == 'recall':
+                    out = out + frames_feature_encoded[-2 - i]
             x_gen = self.conv_last(out)
             if t >= self.seq_len - 1:
                 predictions.append(x_gen)

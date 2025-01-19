@@ -116,17 +116,24 @@ def visual(true, preds=None, name='./pic/test.pdf'):
 
 def visual_st(true, preds=None, name='./pic/test.pdf'):
     """
-    Results visualization for spatio-temporal data
+    Results visualization for spatio-temporal data using same colorbar
     true: [T, H, W] T is the time steps
     preds: [T, H, W] T is the time steps
     """
     T, H, W = true.shape
     fig, ax = plt.subplots(2, T, figsize=(T * 5, 5))
+    # 确定统一的颜色范围
+    if preds is not None:
+        vmin = min(true.min(), preds.min())  # 全局最小值
+        vmax = max(true.max(), preds.max())  # 全局最大值
+    else:
+        vmin = true.min()
+        vmax = true.max()
     for i in range(T):
-        ax[0, i].imshow(true[i], cmap='jet')
+        ax[0, i].imshow(true[i], cmap='jet', vmin=vmin, vmax=vmax)
         ax[0, i].set_title('GroundTruth')
         if preds is not None:
-            ax[1, i].imshow(preds[i], cmap='jet')
+            ax[1, i].imshow(preds[i], cmap='jet', vmin=vmin, vmax=vmax)
             ax[1, i].set_title('Prediction')
     plt.savefig(name, bbox_inches='tight', dpi=200)
 
