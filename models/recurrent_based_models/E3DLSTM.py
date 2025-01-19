@@ -42,7 +42,7 @@ class Model(nn.Module):
             cell_list.append(Eidetic3DLSTMCell(in_channel, self.num_hidden, self.window_length, height, width, self.filter_size, self.stride, self.layer_norm))
         self.cell_list = nn.ModuleList(cell_list)
 
-        self.conv_last = nn.Conv2d(self.num_hidden, self.d_patch, kernel_size=1, stride=1, padding=0, bias=False)
+        self.conv_last = nn.Conv3d(self.num_hidden, self.d_patch, kernel_size=(self.window_length, 1, 1), stride=(self.window_length, 1, 1), padding=0, bias=False)
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]

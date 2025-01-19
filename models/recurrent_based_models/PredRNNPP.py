@@ -52,6 +52,8 @@ class Model(nn.Module):
         for i in range(2, self.num_layers):
             h_t[i], c_t[i], memory = self.cell_list[i](h_t[i - 1], h_t[i], c_t[i], memory)
 
+        return memory, z_t
+
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         if kwargs.get('mask_true', None) is not None:
@@ -85,7 +87,7 @@ class Model(nn.Module):
         memory = torch.zeros([B, self.num_hidden, H, W], device=x_ts.device)
 
         # gradient highway
-        z_t = torch.zeros_like(x_ts[:, 0], device=x_ts.device)
+        z_t = None
 
         predictions = []
 
@@ -109,7 +111,7 @@ class Model(nn.Module):
                 else:
                     x_t = x_gen
 
-            self.forward_one_time_step(x_t, h_t, c_t, memory, z_t)
+            memory, z_t = self.forward_one_time_step(x_t, h_t, c_t, memory, z_t)
             x_gen = self.conv_last(h_t[self.num_layers - 1])
             if t >= self.seq_len - 1:
                 predictions.append(x_gen)
@@ -119,4 +121,4 @@ class Model(nn.Module):
         # patch recovery
         dec_out = rearrange(dec_out, 'b t (c p1 p2) h w -> b t (p1 h) (p2 w) c', p1=self.configs.patch_size, p2=self.configs.patch_size)
         
-        return dec_out
+        return dec_out, None

@@ -27,8 +27,8 @@ class Exp_Main(Exp_Basic):
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
 
-    def _get_data(self, flag):
-        data_set, data_loader = data_provider(self.args, flag)
+    def _get_data(self, flag, test_batch_size):
+        data_set, data_loader = data_provider(self.args, flag, test_batch_size)
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -134,7 +134,7 @@ class Exp_Main(Exp_Basic):
     def train(self, setting):
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
-        test_data, test_loader = self._get_data(flag='test')
+        test_data, test_loader = self._get_data(flag='test', test_batch_size=self.args.batch_size)
 
         self.model_save_path = os.path.join(self.args.model_save_path, setting)
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
@@ -248,7 +248,8 @@ class Exp_Main(Exp_Basic):
                 break
 
     def test(self, setting, load_weight=True):
-        test_data, test_loader = self._get_data(flag='test')
+        test_batch_size = self.args.batch_size if self.args.model == 'MIM' else 1
+        test_data, test_loader = self._get_data(flag='test', test_batch_size=test_batch_size)
         if load_weight:
             print('loading supervised model weight')
             self.model.load_state_dict(torch.load(os.path.join(self.args.model_save_path + setting, 'checkpoint.pth'), map_location=self.device))
@@ -312,8 +313,13 @@ class Exp_Main(Exp_Basic):
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
                     shape = outputs.shape
-                    outputs = test_data.inverse_transform(outputs.squeeze(0)).reshape(shape)
-                    batch_y = test_data.inverse_transform(batch_y.squeeze(0)).reshape(shape)
+                    if outputs.shape[0] > 1:
+                        for i in range(outputs.shape[0]):
+                            outputs[i] = test_data.inverse_transform(outputs[i]).reshape(shape[1:])
+                            batch_y[i] = test_data.inverse_transform(batch_y[i]).reshape(shape[1:])
+                    else:
+                        outputs = test_data.inverse_transform(outputs.squeeze(0)).reshape(shape)
+                        batch_y = test_data.inverse_transform(batch_y.squeeze(0)).reshape(shape)
                 
                 outputs = outputs[..., f_dim:]
                 batch_y = batch_y[..., f_dim:]
@@ -322,16 +328,16 @@ class Exp_Main(Exp_Basic):
                 true = batch_y
                 preds.append(pred)
                 trues.append(true)
-                # if i % 20 == 0:
-                #     # input = batch_x.detach().cpu().numpy()
-                #     # if test_data.scale and self.args.inverse:
-                #     #     shape = input.shape
-                #     #     input = test_data.inverse_transform(input.squeeze(0)).reshape(shape)
-                #     # gt = np.concatenate((input[0, -365:, -1], true[0, :, -1]), axis=0)
-                #     # pd = np.concatenate((input[0, -365:, -1], pred[0, :, -1]), axis=0)
-                #     gt = true[0, :, ..., -1]
-                #     pd = pred[0, :, ..., -1]
-                #     visual_st(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
+                if i % 100 == 0:
+                    # input = batch_x.detach().cpu().numpy()
+                    # if test_data.scale and self.args.inverse:
+                    #     shape = input.shape
+                    #     input = test_data.inverse_transform(input.squeeze(0)).reshape(shape)
+                    # gt = np.concatenate((input[0, -365:, -1], true[0, :, -1]), axis=0)
+                    # pd = np.concatenate((input[0, -365:, -1], pred[0, :, -1]), axis=0)
+                    gt = true[0, :, ..., -1]
+                    pd = pred[0, :, ..., -1]
+                    visual_st(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -340,7 +346,7 @@ class Exp_Main(Exp_Basic):
         trues = trues.reshape(-1, preds.shape[-4], preds.shape[-3], trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
-        mask = mask.detach().cpu().numpy()[:, None, :, :, None]
+        mask = mask[0].detach().cpu().numpy()[None, None, :, :, None]
         print(mask.shape)
 
         mse, mae, rmse, pnsr, ssim = metric_st(preds, trues, mask)

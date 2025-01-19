@@ -1257,8 +1257,8 @@ def tensordot(a,b,dim):
         sizeb1 = sizeb[len(bdims):]
         N = reduce(l, sizea1, 1)
         assert reduce(l, sizeb0, 1) == N
-    a = a.view([-1,N])
-    b = b.view([N,-1])
+    a = a.view([-1,N]).double()
+    b = b.view([N,-1]).double()
     c = a@b
     return c.view(sizea0+sizeb1)
 

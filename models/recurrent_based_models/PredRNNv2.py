@@ -52,7 +52,7 @@ class Model(nn.Module):
         delta_c_list[0] = F.normalize(self.adapter(delta_c).flatten(start_dim=2), dim=2)
         delta_m_list[0] = F.normalize(self.adapter(delta_m).flatten(start_dim=2), dim=2)
         for i in range(1, self.num_layers):
-            h_t[i], c_t[i], memory = self.cell_list[i](h_t[i - 1], h_t[i], c_t[i], memory)
+            h_t[i], c_t[i], memory, delta_c, delta_m = self.cell_list[i](h_t[i - 1], h_t[i], c_t[i], memory)
             delta_c_list[i] = F.normalize(self.adapter(delta_c).flatten(start_dim=2), dim=2)
             delta_m_list[i] = F.normalize(self.adapter(delta_m).flatten(start_dim=2), dim=2)
 

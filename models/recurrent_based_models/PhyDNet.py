@@ -114,15 +114,15 @@ class Model(nn.Module):
         width = configs.width // configs.patch_size
         input_shape = (height, width)
 
-        self.phycell = PhyCell(input_shape=input_shape, input_dim=64, F_hidden_dims=[49], n_layers=1, kernel_size=(7,7))
-        self.convcell = PhyD_ConvLSTM(input_shape=input_shape, input_dim=64, hidden_dims=[128,128,64], n_layers=3, kernel_size=(3,3))
+        self.phycell = PhyCell(input_shape=input_shape, input_dim=64, F_hidden_dims=[49], n_layers=1, kernel_size=(7,7), device='cuda')
+        self.convcell = PhyD_ConvLSTM(input_shape=input_shape, input_dim=64, hidden_dims=[128,128,64], n_layers=3, kernel_size=(3,3), device='cuda')
         self.encoder = PhyD_EncoderRNN(self.phycell, self.convcell, in_channel=configs.enc_in, patch_size=patch_size)
         self.k2m = K2M([7,7])
 
         self.constraints = self._get_constraints()
 
     def _get_constraints(self):
-        constraints = torch.zeros((49, 7, 7))
+        constraints = torch.zeros((49, 7, 7), device='cuda')
         ind = 0
         for i in range(0, 7):
             for j in range(0, 7):
@@ -139,7 +139,7 @@ class Model(nn.Module):
                 raise ValueError("mask_true is required for RSS and SS")
             mask_true = torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4], device=x_enc.device)
         
-        mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
+        mask_true = rearrange(mask_true, 'b t h w (c p1 p2) -> b t c (p1 h) (p2 w)', p1=self.configs.patch_size, p2=self.configs.patch_size)
         
         if kwargs.get('batch_y', None) is not None:
             batch_y = kwargs['batch_y']

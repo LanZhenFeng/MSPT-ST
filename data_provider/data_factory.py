@@ -7,14 +7,14 @@ data_dict = {
 }
 
 
-def data_provider(args, flag):
+def data_provider(args, flag, test_batch_size=1):
     Data = data_dict[args.data]
     timeenc = 0 if args.embed != 'timeF' else 1
 
     if flag == 'test':
         shuffle_flag = False
         drop_last = True
-        batch_size = 1  # bsz=1 for evaluation
+        batch_size = test_batch_size  # bsz=1 for evaluation
         freq = args.freq
     else:
         shuffle_flag = True
