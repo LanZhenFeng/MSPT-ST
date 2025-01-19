@@ -142,7 +142,7 @@ class Model(nn.Module):
 
             states_down, x = self.Downsample(x_t, states_down) 
             states_up, x_gen = self.Upsample(x, states_up)
-            if t >= self.seq_len:
+            if t >= self.seq_len - 1:
                 predictions.append(x_gen)
 
         dec_out = torch.stack(predictions, dim=1)

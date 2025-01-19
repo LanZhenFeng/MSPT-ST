@@ -79,7 +79,7 @@ class Model(nn.Module):
                     x_t = x_gen
 
             x_gen, states = self.ST(x_t, states)
-            if t >= self.seq_len:
+            if t >= self.seq_len - 1:
                 predictions.append(x_gen)
 
         dec_out = torch.stack(predictions, dim=1)
