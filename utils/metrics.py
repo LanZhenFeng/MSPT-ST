@@ -59,29 +59,49 @@ def metric(pred, true):
 '''
 Metrics for evaluation of spatio-temporal forecasting models
 '''
+# def MSE_ST(pred, true, spatial_norm=False):
+#     # pred [B, T, H, W, C], true [B, T, H, W, C]
+#     if not spatial_norm:
+#         return np.mean((pred-true)**2, axis=(0, 1)).sum()
+#     else:
+#         norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+#         return np.mean((pred-true)**2 / norm, axis=(0, 1)).sum()
+
+# def RMSE_ST(pred, true, spatial_norm=False):
+#     # pred [B, T, H, W, C], true [B, T, H, W, C]
+#     if not spatial_norm:
+#         return np.sqrt(np.mean((pred-true)**2, axis=(0, 1)).sum())
+#     else:
+#         norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+#         return np.sqrt(np.mean((pred-true)**2 / norm, axis=(0, 1)).sum())
+
+# def MAE_ST(pred, true, spatial_norm=False):
+#     # pred [B, T, H, W, C], true [B, T, H, W, C]
+#     if not spatial_norm:
+#         return np.mean(np.abs(pred-true), axis=(0, 1)).sum()
+#     else:
+#         norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+#         return np.mean(np.abs(pred-true) / norm, axis=(0, 1)).sum()
+
 def MSE_ST(pred, true, spatial_norm=False):
-    # pred [B, T, H, W, C], true [B, T, H, W, C]
+    diff_sq = (pred - true)**2
     if not spatial_norm:
-        return np.mean((pred-true)**2, axis=(0, 1)).sum()
+        return np.mean(diff_sq, axis=(0, 1)).sum()
     else:
         norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
-        return np.mean((pred-true)**2 / norm, axis=(0, 1)).sum()
+        return (np.mean(diff_sq / norm, axis=(0, 1))).sum()
 
 def RMSE_ST(pred, true, spatial_norm=False):
-    # pred [B, T, H, W, C], true [B, T, H, W, C]
-    if not spatial_norm:
-        return np.sqrt(np.mean((pred-true)**2, axis=(0, 1)).sum())
-    else:
-        norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
-        return np.sqrt(np.mean((pred-true)**2 / norm, axis=(0, 1)).sum())
+    mse = MSE_ST(pred, true, spatial_norm)
+    return np.sqrt(mse)
 
 def MAE_ST(pred, true, spatial_norm=False):
-    # pred [B, T, H, W, C], true [B, T, H, W, C]
+    diff_abs = np.abs(pred - true)
     if not spatial_norm:
-        return np.mean(np.abs(pred-true), axis=(0, 1)).sum()
+        return np.mean(diff_abs, axis=(0, 1)).sum()
     else:
         norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
-        return np.mean(np.abs(pred-true) / norm, axis=(0, 1)).sum()
+        return (np.mean(diff_abs / norm, axis=(0, 1))).sum()
 
 def PSNR(pred, true, min_max_norm=True):
     """Peak Signal-to-Noise Ratio.
@@ -116,13 +136,21 @@ def SSIM(pred, true):
     return ssim / (pred.shape[0] * pred.shape[1])
 
 
-def metric_st(pred, true, mask):
-    pred = pred * mask
-    true = true * mask
-    print(pred.shape, true.shape)
+def metric_st(pred, true):
     mse = MSE_ST(pred, true, False)
     mae = MAE_ST(pred, true, False)
     rmse = RMSE_ST(pred, true, False)
     psnr = PSNR_ST(pred, true)
     ssim = SSIM(pred, true)
     return mse, mae, rmse, psnr, ssim
+
+# def metric_st_batch(pred, true, batch_size=10):
+#     mse, mae, rmse, psnr, ssim = 0, 0, 0, 0, 0
+#     for i in range(0, pred.shape[0], batch_size):
+#         mse += MSE_ST(pred[i:i+batch_size], true[i:i+batch_size], False)
+#         mae += MAE_ST(pred[i:i+batch_size], true[i:i+batch_size], False)
+#         rmse += RMSE_ST(pred[i:i+batch_size], true[i:i+batch_size], False)
+#         psnr += PSNR_ST(pred[i:i+batch_size], true[i:i+batch_size])
+#         ssim += SSIM(pred[i:i+batch_size], true[i:i+batch_size])
+
+#     return mse / (pred.shape[0] // batch_size), mae / (pred.shape[0] // batch_size), rmse / (pred.shape[0] // batch_size), psnr / (pred.shape[0] // batch_size), ssim / (pred.shape[0] // batch_size)

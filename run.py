@@ -154,6 +154,9 @@ if __name__ == '__main__':
             print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
             exp.test(setting, load_weight=True)
             torch.cuda.empty_cache()
+
+            print('>>>>>>>calculate metrics : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+            exp.metric(setting)
     else:
         ii = 0
         setting = '{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
@@ -180,5 +183,8 @@ if __name__ == '__main__':
         print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
         exp.test(setting, load_weight=True) 
         torch.cuda.empty_cache()
+
+        print('>>>>>>>calculate metrics : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+        exp.metric(setting)
     
     

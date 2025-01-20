@@ -352,10 +352,22 @@ class Exp_Main(Exp_Basic):
         trues = trues.reshape(-1, preds.shape[-4], preds.shape[-3], trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
-        mask = mask.detach().cpu().numpy()[None, None, :, :, None]
+        mask = mask.detach().cpu().numpy().astype(np.bool_)
+        mask = mask[None, None, :, :, None]
         print(mask.shape)
 
-        mse, mae, rmse, pnsr, ssim = metric_st(preds, trues, mask)
+        preds *= mask
+        trues *= mask
+
+        np.save(results_save_path + 'pred.npy', preds)
+        np.save(results_save_path + 'true.npy', trues)
+
+    def cal_metrics(self, setting):
+        results_save_path = self.args.results_save_path + setting + '/'
+        preds = np.load(results_save_path + 'pred.npy')
+        trues = np.load(results_save_path + 'true.npy')
+        
+        mse, mae, rmse, pnsr, ssim = metric_st(preds, trues)
         print('mse:{}, mae:{}, rmse:{}, pnsr:{}, ssim:{}'.format(mse, mae, rmse, pnsr, ssim))
         f = open("result_sstp_st_forecast.txt", 'a')
         f.write(setting + "  \n")
@@ -365,8 +377,6 @@ class Exp_Main(Exp_Basic):
         f.close()
 
         np.save(results_save_path + 'metrics.npy', np.array([mse, mae, rmse, pnsr, ssim]))
-        np.save(results_save_path + 'pred.npy', preds * mask)
-        np.save(results_save_path + 'true.npy', trues * mask)
 
     def get_model(self):
         return self.model.module if isinstance(self.model, nn.DataParallel) else self.model
