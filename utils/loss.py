@@ -9,11 +9,11 @@ class MaskedMSELoss(nn.Module):
     def forward(self, input, target, mask):
         # input [batch, length, height, width, channel] or ([batch, length, channel, height, width], auxiliary_loss)
         # target [batch, length, height, width, channel]
-        # mask [batch, height, width]
+        # mask [height, width]
         if isinstance(input, tuple):
             input, auxiliary_loss = input
 
-        mask = mask.unsqueeze(1).unsqueeze(-1) # [batch, 1, height, width, 1]
+        mask = mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1) # [1, 1, height, width, 1]
         input = input * mask
         target = target * mask
 
@@ -37,7 +37,7 @@ class MaskedMAELoss(nn.Module):
         if isinstance(input, tuple):
             input, auxiliary_loss = input
 
-        mask = mask.unsqueeze(1).unsqueeze(-1) # [batch, 1, height, width, 1]
+        mask = mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1) # [1, 1, height, width, 1]
         input = input * mask
         target = target * mask
 
@@ -62,7 +62,7 @@ class MaskedMSEMAELoss(nn.Module):
         if isinstance(input, tuple):
             input, auxiliary_loss = input
 
-        mask = mask.unsqueeze(1).unsqueeze(-1) # [batch, 1, height, width, 1]
+        mask = mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1) # [1, 1, height, width, 1]
         input = input * mask
         target = target * mask
         

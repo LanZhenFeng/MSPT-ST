@@ -83,10 +83,11 @@ class Exp_Main(Exp_Basic):
         return outputs
     
     def vali(self, vali_data, vali_loader, criterion):
+        mask = vali_data.mask
         total_loss = []
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, mask) in enumerate(vali_loader):
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
@@ -138,6 +139,8 @@ class Exp_Main(Exp_Basic):
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test', test_batch_size=self.args.batch_size)
 
+        mask = train_data.mask
+
         self.model_save_path = os.path.join(self.args.model_save_path, setting)
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
         self.test_results_save_path = os.path.join(self.args.test_results_save_path, setting)
@@ -183,7 +186,7 @@ class Exp_Main(Exp_Basic):
 
             self.model.train()
             epoch_time = time.time()
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, mask) in enumerate(train_loader):
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
                 model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
@@ -252,6 +255,7 @@ class Exp_Main(Exp_Basic):
     def test(self, setting, load_weight=True):
         test_batch_size = self.args.batch_size if self.args.model == 'MIM' else 1
         test_data, test_loader = self._get_data(flag='test', test_batch_size=test_batch_size)
+        mask = test_data.mask
         if load_weight:
             print('loading supervised model weight')
             self.model.load_state_dict(torch.load(os.path.join(self.args.model_save_path + setting, 'checkpoint.pth'), map_location=self.device))
@@ -270,7 +274,7 @@ class Exp_Main(Exp_Basic):
         self.model.eval()
 
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, mask) in enumerate(test_loader):
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
@@ -348,7 +352,7 @@ class Exp_Main(Exp_Basic):
         trues = trues.reshape(-1, preds.shape[-4], preds.shape[-3], trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
-        mask = mask[0].detach().cpu().numpy()[None, None, :, :, None]
+        mask = mask.detach().cpu().numpy()[None, None, :, :, None]
         print(mask.shape)
 
         mse, mae, rmse, pnsr, ssim = metric_st(preds, trues, mask)
