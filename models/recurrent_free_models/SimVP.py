@@ -7,7 +7,7 @@ from einops import rearrange
 from layers.OpenSTL_Modules import ConvSC, ConvNeXtSubBlock, ConvMixerSubBlock, GASubBlock, gInception_ST, HorNetSubBlock, MLPMixerSubBlock, MogaSubBlock, PoolFormerSubBlock, SwinSubBlock, UniformerSubBlock, VANSubBlock, ViTSubBlock, TAUSubBlock
 
 
-class SimVP_Model(nn.Module):
+class Model(nn.Module):
     r"""SimVP Model
 
     Implementation of `SimVP: Simpler yet Better Video Prediction
@@ -18,7 +18,7 @@ class SimVP_Model(nn.Module):
     def __init__(self, configs, N_S=2, N_T=8, model_type='gSTA',
                  mlp_ratio=8., drop=0.1, drop_path=0.1, spatio_kernel_enc=3,
                  spatio_kernel_dec=3, act_inplace=True, **kwargs):
-        super(SimVP_Model, self).__init__()
+        super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
