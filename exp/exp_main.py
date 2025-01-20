@@ -29,7 +29,7 @@ class Exp_Main(Exp_Basic):
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model
 
-    def _get_data(self, flag, test_batch_size):
+    def _get_data(self, flag, test_batch_size=1):
         data_set, data_loader = data_provider(self.args, self.shared_scaler, flag, test_batch_size)
         return data_set, data_loader
 
