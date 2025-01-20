@@ -1,4 +1,5 @@
 from data_provider.data_factory import data_provider
+from data_provider.data_loader import SharedStandardScaler
 from exp.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, TrainTracking, adjust_learning_rate, visual, visual_st, reserve_schedule_sampling_exp, schedule_sampling
 from utils.metrics import metric, metric_st
@@ -19,6 +20,7 @@ warnings.filterwarnings('ignore')
 class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
+        self.shared_scaler = SharedStandardScaler()
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -28,7 +30,7 @@ class Exp_Main(Exp_Basic):
         return model
 
     def _get_data(self, flag, test_batch_size):
-        data_set, data_loader = data_provider(self.args, flag, test_batch_size)
+        data_set, data_loader = data_provider(self.args, self.shared_scaler, flag, test_batch_size)
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -74,7 +76,7 @@ class Exp_Main(Exp_Basic):
 
     def _model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs):
         if self.args.use_amp:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
         else:
             outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
@@ -169,7 +171,7 @@ class Exp_Main(Exp_Basic):
                 f.write(str(k) + ' = ' + str(v) + '\n')
 
         if self.args.use_amp:
-            scaler = torch.cuda.amp.GradScaler()
+            scaler = torch.amp.GradScaler('cuda')
 
         eta = 1.0
         print("Starting training")

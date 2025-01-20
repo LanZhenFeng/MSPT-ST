@@ -1,13 +1,13 @@
-from data_provider.data_loader import Dataset_Temporal, Dataset_SpatioTemporal
+from data_provider.data_loader import Dataset_Temporal, Dataset_SpatioTemporal, Dataset_SpatioTemporalv2
 from torch.utils.data import DataLoader
 
 data_dict = {
     'temporal': Dataset_Temporal,
-    'spatiotemporal': Dataset_SpatioTemporal,
+    'spatiotemporal': Dataset_SpatioTemporalv2,
 }
 
 
-def data_provider(args, flag, test_batch_size=1, pin_memory=False):
+def data_provider(args, shared_scaler, flag, test_batch_size=1, pin_memory=False):
     Data = data_dict[args.data]
     timeenc = 0 if args.embed != 'timeF' else 1
 
@@ -23,6 +23,7 @@ def data_provider(args, flag, test_batch_size=1, pin_memory=False):
         freq = args.freq
 
     data_set = Data(
+        shared_scaler=shared_scaler,
         root_path=args.root_path,
         data_path=args.data_path,
         flag=flag,
