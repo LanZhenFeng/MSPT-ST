@@ -15,7 +15,7 @@ class Model(nn.Module):
 
     """
 
-    def __init__(self, configs, N_S=2, N_T=8, model_type='tau',
+    def __init__(self, configs, N_S=2, N_T=8,
                  mlp_ratio=8., drop=0.1, drop_path=0.1, spatio_kernel_enc=3,
                  spatio_kernel_dec=3, act_inplace=True, **kwargs):
         super(Model, self).__init__()
@@ -26,7 +26,7 @@ class Model(nn.Module):
         self.hid_T = configs.d_ff
         self.model_type = configs.model_type
 
-        H, W = int(H / 2**(N_S/2)), int(W / 2**(N_S/2))  # downsample 1 / 2**(N_S/2)
+        H, W = int(configs.height / 2**(N_S/2)), int(configs.width / 2**(N_S/2))  # downsample 1 / 2**(N_S/2)
         act_inplace = False
         self.enc = Encoder(configs.enc_in, self.hid_S, N_S, spatio_kernel_enc, act_inplace=act_inplace)
         self.dec = Decoder(self.hid_S, configs.enc_in, N_S, spatio_kernel_dec, act_inplace=act_inplace)
