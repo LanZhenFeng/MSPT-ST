@@ -83,7 +83,7 @@ class Exp_Main(Exp_Basic):
         return outputs
     
     def vali(self, vali_data, vali_loader, criterion):
-        mask = vali_data.mask
+        mask = torch.from_numpy(vali_data.mask)
         total_loss = []
         self.model.eval()
         with torch.no_grad():
@@ -139,7 +139,7 @@ class Exp_Main(Exp_Basic):
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test', test_batch_size=self.args.batch_size)
 
-        mask = train_data.mask
+        mask = torch.from_numpy(train_data.mask)
 
         self.model_save_path = os.path.join(self.args.model_save_path, setting)
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
@@ -255,7 +255,7 @@ class Exp_Main(Exp_Basic):
     def test(self, setting, load_weight=True):
         test_batch_size = self.args.batch_size if self.args.model == 'MIM' else 1
         test_data, test_loader = self._get_data(flag='test', test_batch_size=test_batch_size)
-        mask = test_data.mask
+        mask = torch.from_numpy(test_data.mask)
         if load_weight:
             print('loading supervised model weight')
             self.model.load_state_dict(torch.load(os.path.join(self.args.model_save_path + setting, 'checkpoint.pth'), map_location=self.device))
