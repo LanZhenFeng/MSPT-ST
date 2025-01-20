@@ -256,7 +256,7 @@ class Dataset_SpatioTemporal(Dataset):
 
     def __read_data__(self):
         self.scaler = StandardScaler()
-        data_raw = np.load(os.path.join(self.root_path, self.data_path), mmap_mode='r')[:1000]
+        data_raw = np.load(os.path.join(self.root_path, self.data_path), mmap_mode='r')
         data_raw = np.nan_to_num(data_raw, nan=0.0)
         mask_ocean = np.load(os.path.join(self.root_path, 'scs_lat_0to24_lon_105to121_maskocean.npy'), mmap_mode='r')
         '''
