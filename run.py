@@ -111,6 +111,14 @@ if __name__ == '__main__':
         args.device_ids = [int(id_) for id_ in device_ids]
         args.gpu = args.device_ids[0]
 
+    # special setting for SimVP
+    args.model_print = args.model
+    if args.model.startswith('SimVP_'):
+        args.model_type = args.model.split('_')[1]
+        args.model = 'SimVP'
+        model_types = ['gSTA', 'ConvMixer', 'ConvNeXt', 'HorNet', 'MLPMixer', 'MogaNet', 'Poolformer', 'Swin', 'Uniformer', 'VAN', 'ViT']
+        assert args.model_type in model_types, 'model type should be in {}'.format(model_types)
+
     print('Args in experiment:')
     print(args)
     
@@ -121,7 +129,7 @@ if __name__ == '__main__':
             # setting record of experiments
             setting = '{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
                 args.model_id,
-                args.model,
+                args.model_print,
                 args.data,
                 args.features,
                 args.height,
@@ -150,7 +158,7 @@ if __name__ == '__main__':
         ii = 0
         setting = '{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
             args.model_id,
-            args.model,
+            args.model_print,
             args.data,
             args.features,
             args.height,
