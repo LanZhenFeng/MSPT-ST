@@ -330,8 +330,8 @@ class Exp_Main(Exp_Basic):
                 outputs = outputs[..., f_dim:]
                 batch_y = batch_y[..., f_dim:]
 
-                pred = outputs
-                true = batch_y
+                pred = outputs.astype(np.float16)
+                true = batch_y.astype(np.float16)
                 preds.append(pred)
                 trues.append(true)
                 if i % 100 == 0:

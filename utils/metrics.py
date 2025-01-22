@@ -108,7 +108,7 @@ def PSNR(pred, true, min_max_norm=True):
 
     Ref: https://en.wikipedia.org/wiki/Peak_signal-to-noise_ratio
     """
-    mse = np.mean((pred.astype(np.float32) - true.astype(np.float32))**2)
+    mse = np.mean((pred - true)**2)
     if mse == 0:
         return float('inf')
     else:

@@ -1334,7 +1334,7 @@ class STB(SwinTransformerBlock):
                                   num_heads=num_heads, window_size=window_size,
                                   shift_size=0 if (index % 2 == 0) else window_size // 2,
                                   mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,                                   
-                                  drop=drop, attn_drop=attn_drop,
+                                  proj_drop=drop, attn_drop=attn_drop,
                                   drop_path=drop_path,
                                   norm_layer=norm_layer)
         self.red = nn.Linear(2 * dim, dim)
@@ -1353,32 +1353,32 @@ class STB(SwinTransformerBlock):
         x = x.view(B, H, W, C)
 
         # cyclic shift
-        if self.shift_size > 0:
-            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+        if self.shift_size[0] > 0:
+            shifted_x = torch.roll(x, shifts=(-self.shift_size[0], -self.shift_size[0]), dims=(1, 2))
         else:
             shifted_x = x
 
         # partition windows
         x_windows = window_partition(shifted_x, self.window_size)  # num_win*B, window_size, window_size, C
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # num_win*B, window_size*window_size, C
+        x_windows = x_windows.view(-1, self.window_size[0] * self.window_size[0], C)  # num_win*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
         attn_windows = self.attn(x_windows, mask=self.attn_mask)  # num_win*B, window_size*window_size, C
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        attn_windows = attn_windows.view(-1, self.window_size[0], self.window_size[0], C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
 
         # reverse cyclic shift
-        if self.shift_size > 0:
-            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        if self.shift_size[0] > 0:
+            x = torch.roll(shifted_x, shifts=(self.shift_size[0], self.shift_size[0]), dims=(1, 2))
         else:
             x = shifted_x
         x = x.view(B, H * W, C)
 
         # FFN
-        x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        x = shortcut + self.drop_path1(x)
+        x = x + self.drop_path2(self.mlp(self.norm2(x)))
 
         return x
         
@@ -2234,7 +2234,7 @@ class Pooling(nn.Module):
         return self.pool(x) - x
 
 
-class Mlp(nn.Module):
+class PoolformerMlp(nn.Module):
     """
     Implementation of MLP with 1*1 convolutions.
     Input: tensor with shape [B, C, H, W]
@@ -2287,7 +2287,7 @@ class PoolFormerBlock(nn.Module):
         self.token_mixer = Pooling(pool_size=pool_size)
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, 
+        self.mlp = PoolformerMlp(in_features=dim, hidden_features=mlp_hidden_dim, 
                        act_layer=act_layer, drop=drop)
         # The following two techniques are useful to train deep PoolFormers.
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -2517,7 +2517,7 @@ class LKA(nn.Module):
         return u * attn
 
 
-class Attention(nn.Module):
+class VANAttention(nn.Module):
     def __init__(self, d_model, attn_shortcut=True):
         super().__init__()
 
@@ -2543,7 +2543,7 @@ class VANBlock(nn.Module):
     def __init__(self, dim, mlp_ratio=4., drop=0.,drop_path=0., init_value=1e-2, act_layer=nn.GELU, attn_shortcut=True):
         super().__init__()
         self.norm1 = nn.BatchNorm2d(dim)
-        self.attn = Attention(dim, attn_shortcut=attn_shortcut)
+        self.attn = VANAttention(dim, attn_shortcut=attn_shortcut)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
         self.norm2 = nn.BatchNorm2d(dim)
@@ -2968,12 +2968,12 @@ class SwinSubBlock(SwinTransformerBlock):
     """A block of Swin Transformer."""
 
     def __init__(self, dim, input_resolution=None, layer_i=0, mlp_ratio=4., drop=0., drop_path=0.1):
-        window_size = 7 if input_resolution[0] % 7 == 0 else max(4, input_resolution[0] // 16)
-        window_size = min(8, window_size)
+        window_size = 7 if input_resolution[0] % 7 == 0 else max([4, input_resolution[0] // 16])
+        window_size = min([8, window_size])
         shift_size = 0 if (layer_i % 2 == 0) else window_size // 2
         super().__init__(dim, input_resolution, num_heads=8, window_size=window_size,
                          shift_size=shift_size, mlp_ratio=mlp_ratio,
-                         drop_path=drop_path, drop=drop, qkv_bias=True)
+                         proj_drop=drop, attn_drop=drop, drop_path=drop_path, qkv_bias=True)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -2997,8 +2997,8 @@ class SwinSubBlock(SwinTransformerBlock):
         x = x.view(B, H, W, C)
 
         # cyclic shift
-        if self.shift_size > 0:
-            shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+        if self.shift_size[0] > 0:
+            shifted_x = torch.roll(x, shifts=(-self.shift_size[0], -self.shift_size[0]), dims=(1, 2))
         else:
             shifted_x = x
 
@@ -3006,25 +3006,25 @@ class SwinSubBlock(SwinTransformerBlock):
         x_windows = window_partition(
             shifted_x, self.window_size)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(
-            -1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
+            -1, self.window_size[0] * self.window_size[0], C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
         attn_windows = self.attn(x_windows, mask=None)  # nW*B, window_size*window_size, C
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
+        attn_windows = attn_windows.view(-1, self.window_size[0], self.window_size[0], C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
 
         # reverse cyclic shift
-        if self.shift_size > 0:
-            x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+        if self.shift_size[0] > 0:
+            x = torch.roll(shifted_x, shifts=(self.shift_size[0], self.shift_size[0]), dims=(1, 2))
         else:
             x = shifted_x
         x = x.view(B, H * W, C)
 
         # FFN
-        x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        x = shortcut + self.drop_path1(x)
+        x = x + self.drop_path2(self.mlp(self.norm2(x)))
 
         return x.reshape(B, H, W, C).permute(0, 3, 1, 2)
 
@@ -3070,7 +3070,7 @@ class ViTSubBlock(ViTBlock):
 
     def __init__(self, dim, mlp_ratio=4., drop=0., drop_path=0.1):
         super().__init__(dim=dim, num_heads=8, mlp_ratio=mlp_ratio, qkv_bias=True,
-                         drop=drop, drop_path=drop_path, act_layer=nn.GELU, norm_layer=nn.LayerNorm)
+                         proj_drop=drop, attn_drop=drop,drop_path=drop_path, act_layer=nn.GELU, norm_layer=nn.LayerNorm)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.apply(self._init_weights)
 
@@ -3090,8 +3090,8 @@ class ViTSubBlock(ViTBlock):
     def forward(self, x):
         B, C, H, W = x.shape
         x = x.flatten(2).transpose(1, 2)
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        x = x + self.drop_path1(self.attn(self.norm1(x)))
+        x = x + self.drop_path2(self.mlp(self.norm2(x)))
         return x.reshape(B, H, W, C).permute(0, 3, 1, 2)
     
 
@@ -3134,7 +3134,7 @@ class TemporalAttentionModule(nn.Module):
             dim, dim, dd_k, stride=1, padding=dd_p, groups=dim, dilation=dilation)
         self.conv1 = nn.Conv2d(dim, dim, 1)
 
-        self.reduction = max(dim // reduction, 4)
+        self.reduction = max([dim // reduction, 4])
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
             nn.Linear(dim, dim // self.reduction, bias=False), # reduction
@@ -3163,4 +3163,4 @@ class TAUSubBlock(GASubBlock):
         super().__init__(dim=dim, kernel_size=kernel_size, mlp_ratio=mlp_ratio,
                  drop=drop, drop_path=drop_path, init_value=init_value, act_layer=act_layer)
         
-        self.attn = TemporalAttention(dim, kernel_size)
+        self.attn = TemporalAttention(dim, kernel_size) 

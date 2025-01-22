@@ -24,7 +24,7 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
         self.hid_S = configs.d_model
         self.hid_T = configs.d_ff
-        self.model_type = configs.model_type
+        self.model_type = "TAU"
 
         H, W = int(configs.height / 2**(N_S/2)), int(configs.width / 2**(N_S/2))  # downsample 1 / 2**(N_S/2)
         act_inplace = False
