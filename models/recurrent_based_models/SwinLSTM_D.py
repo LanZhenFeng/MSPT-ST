@@ -71,7 +71,7 @@ class Model(nn.Module):
 
     """
 
-    def __init__(self, configs, depths_downsample=[2, 6], depths_upsample=[6, 2], num_heads=[4, 8], patch_size=2, window_size=4):
+    def __init__(self, configs, depths_downsample=[1, 3], depths_upsample=[3, 1], num_heads=[4, 8], window_size=4):
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
@@ -79,7 +79,7 @@ class Model(nn.Module):
         self.depths_downsample = depths_downsample
         self.depths_upsample = depths_upsample
         self.num_heads = num_heads
-        self.patch_size = patch_size
+        self.patch_size = configs.patch_size
         self.window_size = window_size 
 
         # curriculum learning strategy
@@ -87,11 +87,11 @@ class Model(nn.Module):
         curriculum_learning_strategies = ['rss', 'ss', 's']
         assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 's']"
 
-        self.Downsample = DownSample(img_size=[configs.height, configs.width], patch_size=patch_size, in_chans=configs.enc_in,
+        self.Downsample = DownSample(img_size=[configs.height, configs.width], patch_size=self.patch_size, in_chans=configs.enc_in,
                                      embed_dim=configs.d_model, depths_downsample=depths_downsample,
                                      num_heads=num_heads, window_size=window_size)
 
-        self.Upsample = UpSample(img_size=[configs.height, configs.width], patch_size=patch_size, in_chans=configs.enc_in,
+        self.Upsample = UpSample(img_size=[configs.height, configs.width], patch_size=self.patch_size, in_chans=configs.enc_in,
                                      embed_dim=configs.d_model, depths_upsample=depths_upsample,
                                      num_heads=num_heads, window_size=window_size)
 

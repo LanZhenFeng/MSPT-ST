@@ -1,7 +1,7 @@
 from data_provider.data_factory import data_provider
 from data_provider.data_loader import SharedStandardScaler
 from exp.exp_basic import Exp_Basic
-from utils.tools import EarlyStopping, TrainTracking, adjust_learning_rate, visual, visual_st, reserve_schedule_sampling_exp, schedule_sampling
+from utils.tools import EarlyStopping, TrainTracking, CurriculumLearning, adjust_learning_rate, visual, visual_st
 from utils.metrics import metric, metric_st
 from utils.loss import MaskedMSELoss, MaskedMAELoss, MaskedMSEMAELoss
 import torch
@@ -21,6 +21,7 @@ class Exp_Main(Exp_Basic):
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
         self.shared_scaler = SharedStandardScaler()
+        self.curriculum_learning = CurriculumLearning(args)
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -77,10 +78,12 @@ class Exp_Main(Exp_Basic):
     def _model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs):
         if self.args.use_amp:
             with torch.amp.autocast('cuda'):
-                outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
+                outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
         else:
-            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
-        return outputs
+            outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
+        if aux_loss is not None and self.args.use_multi_gpu and self.args.use_gpu:
+            aux_loss = aux_loss.mean()
+        return outputs, aux_loss
     
     def vali(self, vali_data, vali_loader, criterion):
         mask = torch.from_numpy(vali_data.mask)
@@ -102,28 +105,14 @@ class Exp_Main(Exp_Basic):
                 
                 extra_input = {'batch_y': batch_y}
 
-                if self.args.curriculum_learning_strategy == "rss":
-                    mask_true = np.zeros((batch_x.shape[0],
-                                          self.args.seq_len + self.args.pred_len - 1 - 1,
-                                          self.args.height // self.args.patch_size,
-                                          self.args.width // self.args.patch_size,
-                                          self.args.patch_size ** 2 * self.args.enc_in))
-                    mask_true[:, :self.args.seq_len - 1] = 1.
-                    mask_true = torch.from_numpy(mask_true).float().to(self.device)
-                    extra_input['mask_true'] = mask_true
-                elif self.args.curriculum_learning_strategy == "ss":
-                    mask_true = np.zeros((batch_x.shape[0],
-                                          self.args.pred_len - 1,
-                                          self.args.height // self.args.patch_size,
-                                          self.args.width // self.args.patch_size,
-                                          self.args.patch_size ** 2 * self.args.enc_in))
-                    mask_true[:, :self.args.seq_len - 1] = 1.
-                    mask_true = torch.from_numpy(mask_true).float().to(self.device)
+                mask_true = self.curriculum_learning.get_mask_true_on_testing(batch_x.shape[0])
+                if mask_true is not None:
+                    mask_true = mask_true.float().to(self.device)
                     extra_input['mask_true'] = mask_true
 
                 # encoder - decoder
                 outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
-
+                
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
@@ -176,7 +165,6 @@ class Exp_Main(Exp_Basic):
         if self.args.use_amp:
             scaler = torch.amp.GradScaler('cuda')
 
-        eta = 1.0
         print("Starting training")
         for epoch in range(self.args.train_epochs):
             train_track = TrainTracking(self.args.train_epochs, train_steps)
@@ -203,13 +191,9 @@ class Exp_Main(Exp_Basic):
 
                 extra_input = {'batch_y': batch_y}
 
-                if self.args.curriculum_learning_strategy == "rss":
-                    mask_true = reserve_schedule_sampling_exp(num_updates, self.args)
-                    mask_true = torch.from_numpy(mask_true).float().to(self.device)
-                    extra_input['mask_true'] = mask_true
-                elif self.args.curriculum_learning_strategy == "ss":
-                    eta, mask_true = schedule_sampling(eta, num_updates, self.args)
-                    mask_true = torch.from_numpy(mask_true).float().to(self.device)
+                mask_true = self.curriculum_learning.get_mask_true_on_training(num_updates, batch_x.shape[0])
+                if mask_true is not None:
+                    mask_true = mask_true.float().to(self.device)
                     extra_input['mask_true'] = mask_true
 
                 # encoder - decoder
@@ -217,7 +201,7 @@ class Exp_Main(Exp_Basic):
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
-
+                
                 loss = criterion((outputs, aux_loss), batch_y, mask)
                 train_loss.append(loss.item())
 
@@ -290,23 +274,9 @@ class Exp_Main(Exp_Basic):
 
                 extra_input = {'batch_y': batch_y}
 
-                if self.args.curriculum_learning_strategy == "rss":
-                    mask_true = np.zeros((batch_x.shape[0],
-                                          self.args.seq_len + self.args.pred_len - 1 - 1,
-                                          self.args.height // self.args.patch_size,
-                                          self.args.width // self.args.patch_size,
-                                          self.args.patch_size ** 2 * self.args.enc_in))
-                    mask_true[:, :self.args.seq_len - 1] = 1.
-                    mask_true = torch.from_numpy(mask_true).float().to(self.device)
-                    extra_input['mask_true'] = mask_true
-                elif self.args.curriculum_learning_strategy == "ss":
-                    mask_true = np.zeros((batch_x.shape[0],
-                                          self.args.pred_len - 1,
-                                          self.args.height // self.args.patch_size,
-                                          self.args.width // self.args.patch_size,
-                                          self.args.patch_size ** 2 * self.args.enc_in))
-                    mask_true[:, :self.args.seq_len - 1] = 1.
-                    mask_true = torch.from_numpy(mask_true).float().to(self.device)
+                mask_true = self.curriculum_learning.get_mask_true_on_testing(batch_x.shape[0])
+                if mask_true is not None:
+                    mask_true = mask_true.float().to(self.device)
                     extra_input['mask_true'] = mask_true
 
                 # encoder - decoder

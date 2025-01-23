@@ -15,14 +15,14 @@ class Model(nn.Module):
 
     """
 
-    def __init__(self, configs, depths=12, num_heads=4, patch_size=2, window_size=4):
+    def __init__(self, configs, depths=5, num_heads=4, window_size=4):
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
         self.depths = depths
         self.num_heads = num_heads
-        self.patch_size = patch_size
+        self.patch_size = configs.patch_size
         self.window_size = window_size 
 
         # curriculum learning strategy
@@ -30,7 +30,7 @@ class Model(nn.Module):
         curriculum_learning_strategies = ['rss', 'ss', 's']
         assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 's']"
 
-        self.ST = STconvert(img_size=[configs.height, configs.width], patch_size=patch_size, in_chans=configs.enc_in, 
+        self.ST = STconvert(img_size=[configs.height, configs.width], patch_size=self.patch_size, in_chans=configs.enc_in, 
                             embed_dim=configs.d_model, depths=depths,
                             num_heads=num_heads, window_size=window_size)
 

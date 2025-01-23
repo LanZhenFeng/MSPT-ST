@@ -15,7 +15,7 @@ class Model(nn.Module):
 
     """
 
-    def __init__(self, configs, window_length=2, window_stride=1, filter_size=5, stride=1, layer_norm=False):
+    def __init__(self, configs, window_length=2, window_stride=1, filter_size=(2,5,5), stride=1, layer_norm=False):
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len

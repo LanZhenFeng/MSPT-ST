@@ -166,94 +166,122 @@ def cal_accuracy(y_pred, y_true):
     return np.mean(y_pred == y_true)
 
 
-def reserve_schedule_sampling_exp(itr, args):
-    if itr < args.r_sampling_step_1:
-        r_eta = 0.5
-    elif itr < args.r_sampling_step_2:
-        r_eta = 1.0 - 0.5 * math.exp(-float(itr - args.r_sampling_step_1) / args.r_exp_alpha)
-    else:
-        r_eta = 1.0
+class CurriculumLearning:
+    def __init__(self, configs):
+        self.configs = configs
+        self.curriculum_learning_strategy = configs.curriculum_learning_strategy
+        # parameters for reverse schedule sampling
+        self.r_sampling_step_1 = configs.r_sampling_step_1
+        self.r_sampling_step_2 = configs.r_sampling_step_2
+        self.r_exp_alpha = configs.r_exp_alpha
+        # parameters for schedule sampling
+        self.sampling_stop_iter = configs.sampling_stop_iter
+        self.sampling_changing_rate = configs.sampling_changing_rate
+        self.scheduled_sampling = configs.scheduled_sampling
 
-    if itr < args.r_sampling_step_1:
-        eta = 0.5
-    elif itr < args.r_sampling_step_2:
-        eta = 0.5 - (0.5 / (args.r_sampling_step_2 - args.r_sampling_step_1)) * (itr - args.r_sampling_step_1)
-    else:
-        eta = 0.0
+        # special setting for curriculum learning of SwinLSTM
+        if configs.model in ['SwinLSTM_B', 'SwinLSTM_D']:
+            self.patch_size = 1
+        else:
+            self.patch_size = self.args.patch_size
 
-    r_random_flip = np.random.random_sample(
-        (args.batch_size, args.seq_len - 1))
-    r_true_token = (r_random_flip < r_eta)
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.total_len = self.seq_len + self.pred_len
+        self.height = configs.height
+        self.width = configs.width
+        self.C = configs.enc_in
 
-    random_flip = np.random.random_sample(
-        (args.batch_size, args.pred_len - 1))
-    true_token = (random_flip < eta)
+        self.ss_eta = 1.0
 
-    ones = np.ones((args.height // args.patch_size,
-                    args.width // args.patch_size,
-                    args.patch_size ** 2 * args.enc_in))
-    zeros = np.zeros((args.height // args.patch_size,
-                      args.width // args.patch_size,
-                      args.patch_size ** 2 * args.enc_in))
+    def reserve_schedule_sampling_exp(self, itr, batch_size):
+        if itr < self.r_sampling_step_1:
+            r_eta = 0.5
+        elif itr < self.r_sampling_step_2:
+            r_eta = 1.0 - 0.5 * math.exp(-float(itr - self.r_sampling_step_1) / self.r_exp_alpha)
+        else:
+            r_eta = 1.0
 
-    real_input_flag = []
-    for i in range(args.batch_size):
-        for j in range(args.seq_len + args.pred_len - 2):
-            if j < args.seq_len - 1:
-                if r_true_token[i, j]:
+        if itr < self.r_sampling_step_1:
+            eta = 0.5
+        elif itr < self.r_sampling_step_2:
+            eta = 0.5 - (0.5 / (self.r_sampling_step_2 - self.r_sampling_step_1)) * (itr - self.r_sampling_step_1)
+        else:
+            eta = 0.0
+
+        r_random_flip = np.random.random_sample((batch_size, self.seq_len - 1))
+        r_true_token = (r_random_flip < r_eta)
+
+        random_flip = np.random.random_sample((batch_size, self.pred_len - 1))
+        true_token = (random_flip < eta)
+
+        ones = np.ones((self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+        zeros = np.zeros((self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+
+        real_input_flag = []
+        for i in range(batch_size):
+            for j in range(self.total_len - 2):
+                if j < self.seq_len - 1:
+                    if r_true_token[i, j]:
+                        real_input_flag.append(ones)
+                    else:
+                        real_input_flag.append(zeros)
+                else:
+                    if true_token[i, j - (self.seq_len - 1)]:
+                        real_input_flag.append(ones)
+                    else:
+                        real_input_flag.append(zeros)
+
+        real_input_flag = np.array(real_input_flag)
+        real_input_flag = np.reshape(real_input_flag, (batch_size, self.total_len - 2, self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+        return real_input_flag
+
+
+    def schedule_sampling(self, itr, batch_size):
+        zeros = np.zeros((batch_size, self.pred_len - 1, self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+        if not self.scheduled_sampling:
+            return 0.0, zeros
+
+        if itr < self.sampling_stop_iter:
+            self.ss_eta -= self.sampling_changing_rate
+        else:
+            self.ss_eta = 0.0
+        random_flip = np.random.random_sample((batch_size, self.pred_len - 1))
+        true_token = (random_flip < self.ss_eta)
+        ones = np.ones((self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+        zeros = np.zeros((self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+        real_input_flag = []
+        for i in range(batch_size):
+            for j in range(self.pred_len - 1):
+                if true_token[i, j]:
                     real_input_flag.append(ones)
                 else:
                     real_input_flag.append(zeros)
-            else:
-                if true_token[i, j - (args.seq_len - 1)]:
-                    real_input_flag.append(ones)
-                else:
-                    real_input_flag.append(zeros)
-
-    real_input_flag = np.array(real_input_flag)
-    real_input_flag = np.reshape(real_input_flag,
-                                 (args.batch_size,
-                                  args.seq_len + args.pred_len - 2,
-                                  args.height // args.patch_size,
-                                  args.width // args.patch_size,
-                                  args.patch_size ** 2 * args.enc_in))
-    return real_input_flag
+        real_input_flag = np.array(real_input_flag)
+        real_input_flag = np.reshape(real_input_flag, (batch_size, self.pred_len - 1, self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+        return self.ss_eta, real_input_flag
 
 
-def schedule_sampling(eta, itr, args):
-    zeros = np.zeros((args.batch_size,
-                      args.pred_len - 1,
-                      args.height // args.patch_size,
-                      args.width // args.patch_size,
-                      args.patch_size ** 2 * args.enc_in))
-    if not args.scheduled_sampling:
-        return 0.0, zeros
+    def get_mask_true_on_training(self, itr, batch_size):
+        if self.curriculum_learning_strategy == 'rss':
+            return torch.from_numpy(self.reserve_schedule_sampling_exp(itr, batch_size))
+        elif self.curriculum_learning_strategy == 'ss':
+            self.ss_eta, mask_true = self.schedule_sampling(itr, batch_size)
+            return torch.from_numpy(mask_true)
+        else:
+            return None
+            
 
-    if itr < args.sampling_stop_iter:
-        eta -= args.sampling_changing_rate
-    else:
-        eta = 0.0
-    random_flip = np.random.random_sample(
-        (args.batch_size, args.pred_len - 1))
-    true_token = (random_flip < eta)
-    ones = np.ones((args.height // args.patch_size,
-                    args.width // args.patch_size,
-                    args.patch_size ** 2 * args.enc_in))
-    zeros = np.zeros((args.height // args.patch_size,
-                      args.width // args.patch_size,
-                      args.patch_size ** 2 * args.enc_in))
-    real_input_flag = []
-    for i in range(args.batch_size):
-        for j in range(args.pred_len - 1):
-            if true_token[i, j]:
-                real_input_flag.append(ones)
-            else:
-                real_input_flag.append(zeros)
-    real_input_flag = np.array(real_input_flag)
-    real_input_flag = np.reshape(real_input_flag,
-                                 (args.batch_size,
-                                  args.pred_len - 1,
-                                  args.height // args.patch_size,
-                                  args.width // args.patch_size,
-                                  args.patch_size ** 2 * args.enc_in))
-    return eta, real_input_flag
+    def get_mask_true_on_testing(self, batch_size):
+        if self.curriculum_learning_strategy == 'rss':
+            mask_true = np.zeros((batch_size, self.total_len - 2, self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+            mask_true[:, :self.seq_len - 1] = 1.
+            return torch.from_numpy(mask_true)
+        elif self.curriculum_learning_strategy == 'ss':
+            mask_true = np.zeros((batch_size, self.pred_len - 1, self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
+            mask_true[:, :self.seq_len - 1] = 1.
+            return torch.from_numpy(mask_true)
+        else:
+            return None
+
+

@@ -9,7 +9,7 @@ from numpy.linalg import *
 from scipy.special import factorial
 from functools import reduce
 
-from timm.models.swin_transformer import SwinTransformerBlock, window_reverse, PatchEmbed, PatchMerging, window_partition
+from timm.models.swin_transformer import SwinTransformerBlock, window_reverse, PatchEmbed, window_partition
 from timm.layers import to_2tuple
 from timm.models.layers import DropPath, trunc_normal_
 from timm.models.convnext import ConvNeXtBlock
@@ -1391,16 +1391,23 @@ class PatchInflated(nn.Module):
         input_resolution (tuple[int]): Input resulotion.
     """
 
-    def __init__(self, in_chans, embed_dim, input_resolution, stride=2, padding=1, output_padding=1):
+    def __init__(self, patch_size, in_chans, embed_dim, input_resolution, stride=2, padding=1, output_padding=1):
         super(PatchInflated, self).__init__()
 
+        num_layers = int(math.log2(patch_size)) - 1
         stride = to_2tuple(stride)
         padding = to_2tuple(padding)
         output_padding = to_2tuple(output_padding)
         self.input_resolution = input_resolution
 
-        self.Conv = nn.ConvTranspose2d(in_channels=embed_dim, out_channels=in_chans, kernel_size=(3, 3),
-                                       stride=stride, padding=padding, output_padding=output_padding)
+        self.Convs = nn.ModuleList()
+        for i in range(num_layers):
+            self.Convs.append(nn.Sequential(
+                nn.ConvTranspose2d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding),
+                nn.GroupNorm(16, embed_dim),
+                nn.LeakyReLU(0.2, inplace=True)
+            ))
+        self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=in_chans, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding))
 
     def forward(self, x):
         H, W = self.input_resolution
@@ -1408,10 +1415,11 @@ class PatchInflated(nn.Module):
         assert L == H * W, "input feature has wrong size"
         assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
 
-        x = x.view(B, H, W, C)
+        x = x.view(B, H, W, C) 
         x = x.permute(0, 3, 1, 2)
-        x = self.Conv(x)
-
+        for conv_layer in self.Convs:
+            x = conv_layer(x)
+        
         return x
        
 class PatchExpanding(nn.Module):
@@ -1444,6 +1452,40 @@ class PatchExpanding(nn.Module):
 
         return x
 
+
+class PatchMerging(nn.Module):
+    r""" Patch Merging Layer.
+
+    Args:
+        input_resolution (tuple[int]): Resolution of input feature.
+        dim (int): Number of input channels.
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+    def __init__(self, input_resolution, dim, norm_layer=nn.LayerNorm):
+        super(PatchMerging, self).__init__()
+        self.input_resolution = input_resolution
+        self.dim = dim
+        self.norm = norm_layer(4 * dim)
+        self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
+
+    def forward(self, x):
+        """
+        x: B, H*W, C
+        """
+        H, W = self.input_resolution
+        B, L, C = x.shape
+        assert L == H * W, "input feature has wrong size"
+        assert H % 2 == 0 and W % 2 == 0, f"x size ({H}*{W}) are not even."
+
+        x = x.view(B, H, W, C)
+        x = x.reshape(B, H // 2, 2, W // 2, 2, C)
+        x = x.permute(0, 1, 3, 5, 2, 4).reshape(B, H // 2, W // 2, -1)
+        x = x.view(B, -1, 4 * C)
+        x = self.norm(x)
+        x = self.reduction(x)
+
+        return x
+
 class UpSample(nn.Module):
     def __init__(self, img_size, patch_size, in_chans, embed_dim, depths_upsample, num_heads, window_size, mlp_ratio=4.,
                  qkv_bias=True, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
@@ -1456,7 +1498,7 @@ class UpSample(nn.Module):
         self.mlp_ratio = mlp_ratio
         self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, norm_layer=nn.LayerNorm)
         patches_resolution = self.patch_embed.grid_size
-        self.Unembed = PatchInflated(in_chans=in_chans, embed_dim=embed_dim, input_resolution=patches_resolution)
+        self.Unembed = PatchInflated(patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, input_resolution=patches_resolution)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths_upsample))]
 
@@ -1477,22 +1519,12 @@ class UpSample(nn.Module):
                                  mlp_ratio=self.mlp_ratio,
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop_rate, attn_drop=attn_drop_rate,
-                                 drop_path=dpr[sum(depths_upsample[:(self.num_layers - 1 - i_layer)]):
-                                               sum(depths_upsample[:(self.num_layers - 1 - i_layer) + 1])],
+                                 drop_path=dpr[int(sum(depths_upsample[:(self.num_layers - 1 - i_layer)])):
+                                               int(sum(depths_upsample[:(self.num_layers - 1 - i_layer) + 1]))],
                                  norm_layer=norm_layer, flag=flag)
 
             self.layers.append(layer)
             self.upsample.append(upsample)
-
-    # def forword_core(self, x, y):
-    #     hidden_states_up = []
-
-    #     for index, layer in enumerate(self.layers):
-    #         x, hidden_state = layer(x, y[index])
-    #         x = self.upsample[index](x)
-    #         hidden_states_up.append(hidden_state)
-
-    #     return hidden_states_up, x
 
     def forward(self, x, y):
         hidden_states_up = []
@@ -1501,8 +1533,6 @@ class UpSample(nn.Module):
             x, hidden_state = layer(x, y[index])
             x = self.upsample[index](x)
             hidden_states_up.append(hidden_state)
-
-        # hidden_states_up, x = self.forword_core(x, y)
 
         x = torch.sigmoid(self.Unembed(x))
 
@@ -1539,9 +1569,9 @@ class DownSample(nn.Module):
                                  mlp_ratio=self.mlp_ratio,
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop_rate, attn_drop=attn_drop_rate,
-                                 drop_path=dpr[sum(depths_downsample[:i_layer]):sum(depths_downsample[:i_layer + 1])],
+                                 drop_path=dpr[int(sum(depths_downsample[:i_layer])):int(sum(depths_downsample[:i_layer + 1]))],
                                  norm_layer=norm_layer, flag=flag)
-
+            
             self.layers.append(layer)
             self.downsample.append(downsample)
 
@@ -1571,7 +1601,7 @@ class STconvert(nn.Module):
                                       norm_layer=norm_layer)
         patches_resolution = self.patch_embed.grid_size
 
-        self.patch_inflated = PatchInflated(in_chans=in_chans, embed_dim=embed_dim,
+        self.patch_inflated = PatchInflated(patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim,
                                             input_resolution=patches_resolution)
 
         self.layer = SwinLSTMCell(dim=embed_dim, 
@@ -1588,7 +1618,7 @@ class STconvert(nn.Module):
         x, hidden_state = self.layer(x, h)
 
         x = torch.sigmoid(self.patch_inflated(x))
-        
+
         return x, hidden_state
 
 
