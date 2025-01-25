@@ -183,7 +183,7 @@ class CurriculumLearning:
         if configs.model in ['SwinLSTM_B', 'SwinLSTM_D']:
             self.patch_size = 1
         else:
-            self.patch_size = self.args.patch_size
+            self.patch_size = configs.patch_size
 
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
