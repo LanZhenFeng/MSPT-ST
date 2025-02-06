@@ -312,7 +312,7 @@ class PatchRecovery(nn.Module):
     def forward(self, x):
         x = self.proj(x) # -> [B, T, S, P*P*C]
         x = rearrange(x, 'b t (h w) c -> b t h w c', h=self.height//self.patch_size, w=self.width//self.patch_size)
-        x = rearrange(x, 'b t h w (p p c) -> b t (h p) (w p) c', p=self.patch_size)
+        x = rearrange(x, 'b t h w (p1 p2 c) -> b t (h p1) (w p2) c', p1=self.patch_size, p2=self.patch_size)
         return x
 
 
