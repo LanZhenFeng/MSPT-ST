@@ -500,7 +500,7 @@ class Model(nn.Module):
 
         self.patch_recovery = PatchRecovery(configs.d_model, configs.c_out, configs.patch_size, configs.height, configs.width)
 
-    def forward_core(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward_core(self, x_enc):
         # x_enc [B, T, H, W, C]
         
         # patch embedding
