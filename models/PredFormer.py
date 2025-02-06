@@ -421,7 +421,7 @@ class Model(nn.Module):
                 ) for _ in range(configs.e_layers)
             ], norm_layer=nn.LayerNorm(configs.d_model))
 
-        self.patch_recovery = PatchRecovery(configs.d_model, configs.patch_size, configs.height, configs.width)
+        self.patch_recovery = PatchRecovery(configs.d_model, configs.c_out, configs.patch_size, configs.height, configs.width)
 
 
 
