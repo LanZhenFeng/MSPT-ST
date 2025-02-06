@@ -512,7 +512,7 @@ class Model(nn.Module):
         # patch recovery
         dec_out = self.patch_recovery(x_enc)
 
-        return dec_out, attns
+        return dec_out
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         if self.seq_len >= self.pred_len:
