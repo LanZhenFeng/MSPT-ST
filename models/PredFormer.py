@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from layers.Embed import PositionalEmbedding2D
-from layers.SelfAttention_Family import FullAttention
+from layers.SelfAttention_Family import FullAttention, AttentionLayer
 
 
 class GatedTransformerBlock(nn.Module):
@@ -342,7 +342,11 @@ class Model(nn.Module):
         if self.attn_type == 'Full':
             self.encoder = PredFormerEncoder([
                 FullAttentionLayer(
-                    attention=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -352,8 +356,16 @@ class Model(nn.Module):
         elif self.attn_type == 'BinaryTS':
             self.encoder = PredFormerEncoder([
                 BinaryTSLayer(
-                    attention_t=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_s=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention_t=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_s=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -363,8 +375,16 @@ class Model(nn.Module):
         elif self.attn_type == 'BinaryST':
             self.encoder = PredFormerEncoder([
                 BinarySTLayer(
-                    attention_s=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_t=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention_s=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_t=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -374,9 +394,21 @@ class Model(nn.Module):
         elif self.attn_type == 'TripletTST':
             self.encoder = PredFormerEncoder([
                 TripletTSTLayer(
-                    attention_t1=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_s=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_t2=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention_t1=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_s=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_t2=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -386,9 +418,21 @@ class Model(nn.Module):
         elif self.attn_type == 'TripletSTS':
             self.encoder = PredFormerEncoder([
                 TripletSTSLayer(
-                    attention_s1=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_t=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_s2=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention_s1=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_t=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_s2=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -398,10 +442,26 @@ class Model(nn.Module):
         elif self.attn_type == 'QuadrupletTSST':
             self.encoder = PredFormerEncoder([
                 QuadrupletTSSTLayer(
-                    attention_t1=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_s1=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_s2=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_t2=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention_t1=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_s1=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_s2=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_t2=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -411,10 +471,26 @@ class Model(nn.Module):
         elif self.attn_type == 'QuadrupletSTTS':
             self.encoder = PredFormerEncoder([
                 QuadrupletSTTSLayer(
-                    attention_s1=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_t1=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_t2=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
-                    attention_s2=FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                    attention_s1=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_t1=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_t2=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
+                    attention_s2=AttentionLayer(
+                        FullAttention(mask_flag=False, attention_dropout=configs.dropout),
+                        d_model=configs.d_model,
+                        n_heads=configs.n_heads
+                    ),
                     d_model=configs.d_model,
                     d_ff=configs.d_ff,
                     dropout=configs.dropout
@@ -422,8 +498,6 @@ class Model(nn.Module):
             ], norm_layer=nn.LayerNorm(configs.d_model))
 
         self.patch_recovery = PatchRecovery(configs.d_model, configs.c_out, configs.patch_size, configs.height, configs.width)
-
-
 
     def forward_core(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [B, T, H, W, C]
