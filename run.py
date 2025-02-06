@@ -119,6 +119,13 @@ if __name__ == '__main__':
         model_types = ['gSTA', 'ConvMixer', 'ConvNeXt', 'HorNet', 'MLPMixer', 'MogaNet', 'Poolformer', 'Swin', 'Uniformer', 'VAN', 'ViT']
         assert args.model_type in model_types, 'model type should be in {}'.format(model_types)
 
+    # special setting for PredFormer
+    if args.model.startswith('PredFormer_'):
+        args.attn_type = args.model.split('_')[1]
+        args.model = 'PredFormer'
+        attn_types = ['Full', 'FacTS', 'FacST', 'BinaryTS', 'BinaryST', 'TripletTST', 'TripletSTS', 'QuadrupletTSST', 'QuadrupletSTTS']
+        assert args.attn_type in attn_types, 'attn type should be in {}'.format(attn_types)
+
     print('Args in experiment:')
     print(args)
     
