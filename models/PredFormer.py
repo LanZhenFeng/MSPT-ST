@@ -295,9 +295,10 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x):
         # x [B, T, H, W, C]
-        x = rearrange(x, 'b t h w c -> b t c h w')
+        B = x.shape[0]
+        x = rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.proj(x) # -> [B, T, D, H//P, W//P]
-        x = rearrange(x, 'b t d h w -> b t (h w) d') # -> [B, T, S, D]
+        x = rearrange(x, '(b t) d h w -> b t (h w) d', b=B) # -> [B, T, S, D]
         return x
 
 class PatchRecovery(nn.Module):
