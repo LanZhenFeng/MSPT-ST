@@ -299,18 +299,20 @@ class PatchEmbed(nn.Module):
         x = rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.proj(x) # -> [B, T, D, H//P, W//P]
         x = rearrange(x, '(b t) d h w -> b t (h w) d', b=B) # -> [B, T, S, D]
+        x = self.norm(x)
         return x
 
 class PatchRecovery(nn.Module):
-    def __init__(self, d_model, c_out, patch_size, height, width):
+    def __init__(self, d_model, c_out, patch_size, height, width, dropout=0.):
         super(PatchRecovery, self).__init__()
         self.proj = nn.Linear(d_model, patch_size*patch_size*c_out)
         self.patch_size = patch_size
         self.height = height
         self.width = width
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = self.proj(x) # -> [B, T, S, P*P*C]
+        x = self.proj(self.dropout(x)) # -> [B, T, S, P*P*C]
         x = rearrange(x, 'b t (h w) c -> b t h w c', h=self.height//self.patch_size, w=self.width//self.patch_size)
         x = rearrange(x, 'b t h w (p1 p2 c) -> b t (h p1) (w p2) c', p1=self.patch_size, p2=self.patch_size)
         return x
@@ -339,6 +341,7 @@ class Model(nn.Module):
         # self.positional_encoding = nn.Parameter(torch.randn(1, configs.seq_len, configs.d_model))
         H, W = self.height // self.patch_size, self.width // self.patch_size
         self.positional_encoding = PositionalEmbedding2D(configs.d_model, H, W)
+        self.pos_drop = nn.Dropout(configs.dropout)
 
         if self.attn_type == 'Full':
             self.encoder = PredFormerEncoder([
@@ -498,13 +501,16 @@ class Model(nn.Module):
                 ) for _ in range(configs.e_layers)
             ], norm_layer=nn.LayerNorm(configs.d_model))
 
-        self.patch_recovery = PatchRecovery(configs.d_model, configs.c_out, configs.patch_size, configs.height, configs.width)
+        self.patch_recovery = PatchRecovery(configs.d_model, configs.c_out, configs.patch_size, configs.height, configs.width, configs.dropout)
 
     def forward_core(self, x_enc):
         # x_enc [B, T, H, W, C]
         
         # patch embedding
         x_enc = self.patch_embed(x_enc) # -> [B, T, S, D]
+
+        # position encoding
+        x_enc = self.pos_drop(x_enc + self.positional_encoding(x_enc))
 
         # encoding
         x_enc, attns = self.encoder(x_enc, attn_mask=None, tau=None, delta=None)
