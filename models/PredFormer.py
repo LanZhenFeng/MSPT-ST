@@ -340,7 +340,7 @@ class Model(nn.Module):
 
         # self.positional_encoding = nn.Parameter(torch.randn(1, configs.seq_len, configs.d_model))
         H, W = self.height // self.patch_size, self.width // self.patch_size
-        self.positional_encoding = PositionalEmbedding2D(configs.d_model, H, W)
+        self.positional_encoding = PositionalEmbedding2D(configs.d_model, self.seq_len, H*W)
         self.pos_drop = nn.Dropout(configs.dropout)
 
         if self.attn_type == 'Full':
