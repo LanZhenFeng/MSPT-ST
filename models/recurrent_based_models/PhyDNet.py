@@ -142,7 +142,7 @@ class Model(nn.Module):
         mask_true = rearrange(mask_true, 'b t h w (c p1 p2) -> b t c (p1 h) (p2 w)', p1=self.configs.patch_size, p2=self.configs.patch_size)
         
         if kwargs.get('batch_y', None) is not None:
-            batch_y = kwargs['batch_y']
+            batch_y = kwargs['batch_y'].to(x_enc.device)
             x_enc = torch.cat([x_enc, batch_y[:, -self.seq_len:]], dim=1)
         else:
             if self.cls in ['rss', 'ss']:

@@ -35,7 +35,8 @@ class Exp_Main(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self):
-        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        # model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        model_optim = optim.AdamW(self.model.parameters(), lr=self.args.learning_rate)
         return model_optim
     
     def _select_scheduler(self, optimizer, lr, train_steps, train_epochs):
@@ -92,7 +93,7 @@ class Exp_Main(Exp_Basic):
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -115,7 +116,7 @@ class Exp_Main(Exp_Basic):
                 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
 
                 loss = criterion((outputs, aux_loss), batch_y, mask)
                 total_loss.append(loss.item())
@@ -178,7 +179,7 @@ class Exp_Main(Exp_Basic):
                 model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
@@ -200,7 +201,7 @@ class Exp_Main(Exp_Basic):
                 outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, **extra_input)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
                 
                 loss = criterion((outputs, aux_loss), batch_y, mask)
                 train_loss.append(loss.item())
@@ -260,7 +261,7 @@ class Exp_Main(Exp_Basic):
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
@@ -284,7 +285,7 @@ class Exp_Main(Exp_Basic):
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
