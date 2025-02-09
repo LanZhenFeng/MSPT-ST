@@ -34,21 +34,14 @@ def dispatch(inp, gates):
 
 def combine(expert_out, gates, multiply_by_gates=True):
     # sort experts
-    print(gates.shape)
     sorted_experts, index_sorted_experts = torch.nonzero(gates).sort(0)
-    print(sorted_experts.shape, index_sorted_experts.shape)
     _, _expert_index = sorted_experts.split(1, dim=1)
-    print(_expert_index.shape)
     # get according batch index for each expert
     _batch_index = torch.nonzero(gates)[index_sorted_experts[:, 1], 0]
-    print(_batch_index.shape)
     gates_exp = gates[_batch_index.flatten()]
-    print(gates_exp.shape)
     _nonzero_gates = torch.gather(gates_exp, 1, _expert_index)
-    print(_nonzero_gates.shape)
     # apply exp to expert outputs, so we are not longer in log space
     stitched = torch.cat(expert_out, 0).exp()
-    print(stitched.shape)
     if multiply_by_gates:
         stitched = torch.einsum("bdthw,bk -> bdthw", stitched, _nonzero_gates)
     zeros = torch.zeros(gates.size(0),
@@ -116,7 +109,7 @@ class GatedTransformerBlock(nn.Module):
 
 class MSPTSTEncoderLayer(nn.Module):
     def __init__(self, attention_v, attention_t, attention_s, d_model, d_ff=None, dropout=0.1, activation="relu"):
-        super(GatedTransformerBlock, self).__init__()
+        super(MSPTSTEncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention_v = attention_v
         self.attention_t = attention_t
@@ -129,7 +122,7 @@ class MSPTSTEncoderLayer(nn.Module):
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, T, S, D]
-        B = x.shape[0]
+        B, T, S, D = x.shape
         x = rearrange(x, 'b t s d -> (b t) s d')
         # Spatio Attention
         res = x
@@ -140,7 +133,7 @@ class MSPTSTEncoderLayer(nn.Module):
         )
         x = self.norm1(res + self.dropout(x))
 
-        x = rearrange(x, '(b t) s d -> (b s) t d', b=B)
+        x = rearrange(x, '(b t) s d -> (b s) t d', t=T)
 
         # Temporal Attention
         res = x
@@ -151,7 +144,7 @@ class MSPTSTEncoderLayer(nn.Module):
         )
         x = self.norm2(res + self.dropout(x))
 
-        x = rearrange(x, '(b s) t d -> b t s d', b=B)
+        x = rearrange(x, '(b s) t d -> b t s d', s=S)
 
         # MLP
         res = x
@@ -162,7 +155,7 @@ class MSPTSTEncoderLayer(nn.Module):
 
 class MSPTSTEncoderLayer_PreNorm(nn.Module):
     def __init__(self, attention_v, attention_t, attention_s, d_model, d_ff=None, dropout=0.1, activation="relu"):
-        super(GatedTransformerBlock, self).__init__()
+        super(MSPTSTEncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention_v = attention_v
         self.attention_t = attention_t
@@ -175,7 +168,7 @@ class MSPTSTEncoderLayer_PreNorm(nn.Module):
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, T, S, D]
-        B = x.shape[0]
+        B, T, S, D = x.shape
         x = rearrange(x, 'b t s d -> (b t) s d')
         # Spatio Attention
         res = x
@@ -187,7 +180,7 @@ class MSPTSTEncoderLayer_PreNorm(nn.Module):
         )
         x = res + self.dropout(x)
 
-        x = rearrange(x, '(b t) s d -> (b s) t d', b=B)
+        x = rearrange(x, '(b t) s d -> (b s) t d', t=T)
 
         # Temporal Attention
         res = x
@@ -199,7 +192,7 @@ class MSPTSTEncoderLayer_PreNorm(nn.Module):
         )
         x = res + self.dropout(x)
 
-        x = rearrange(x, '(b s) t d -> b t s d', b=B)
+        x = rearrange(x, '(b s) t d -> b t s d', s=S)
 
         # MLP
         res = x
@@ -251,12 +244,12 @@ class FourierLayer(nn.Module):
             nn.Conv2d(in_channels=in_chans, out_channels=in_chans*4, kernel_size=4, stride=4), # [BT, C*4, H//4, W//4]
             Permute(0, 2, 3, 1), # [BT, H//4, W//4, C*4]
             nn.LayerNorm(in_chans*4),
-            nn.ReLU(),
+            nn.GELU(),
             Permute(0, 3, 1, 2), # [BT, C*4, H//4, W//4]
             nn.Conv2d(in_channels=in_chans*4, out_channels=in_chans*16, kernel_size=4, stride=4), # [BT, C*16, H//16, W//16]
             Permute(0, 2, 3, 1), # [BT, H//16, W//16, C*16]
-            nn.LayerNorm(in_chans*4),
-            nn.ReLU(),
+            nn.LayerNorm(in_chans*16),
+            nn.GELU(),
             nn.Flatten(1, -1), # [BT, C*16*H//16*W//16]
             nn.Linear(in_features=in_chans*16*height//16*width//16, out_features=512)
         ) 
@@ -267,10 +260,10 @@ class FourierLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def get_patch_sizes(self, seq_len):
+    def get_segment_sizes(self, seq_len):
         # get the period list, first element is inf
         peroid_list = 1 / torch.fft.rfftfreq(seq_len)[1:]
-        segment_sizes = peroid_list.floor().int().unique().detach().cpu().numpy()[::-1]
+        segment_sizes = (peroid_list + 1e-5).int().unique().detach().cpu().numpy()[::-1]
         # segment_sizes = peroid_list.ceil().int().unique().detach().cpu().numpy()[::-1]
         print(f"Segment sizes: {segment_sizes}")
         return segment_sizes
@@ -323,9 +316,9 @@ class CubeEmbed(nn.Module):
         self.num_cubes = ((seq_len - segment_size) // stride_t + 1) * (img_size[0] // stride_s) * (img_size[1] // stride_s)
 
     def forward(self, x):
-        # x [B, C, T, H, W, C]
+        # x [B, C, T, H, W]
         x = self.proj(x) # -> [B, D, T//S, H//P, W//P]
-        x = rearrange(x, 'b d t h w -> b t (h w) d') # -> [B, S, H*W, D]
+        x = rearrange(x, 'b d t h w -> b t (h w) d') # -> [B, T, H*W, D]
         x = self.norm(x)
         return x
 
@@ -353,7 +346,7 @@ class MultiScaleCubeEmbed(nn.Module):
         # x [B, T, H, W, C]
         x = rearrange(x, 'b t h w c -> b c t h w') # -> [B, C, T, H, W]
         xs = dispatch(x, gates) # -> Ps * [B, C, T, H, W]
-        xs = [embed(F.pad(x, (0, segment_size - self.seq_len % segment_size, 0, 0, 0, 0), mode='replicate')) for x, segment_size, embed in zip(xs, self.segment_sizes, self.embed_layers)]
+        xs = [embed(F.pad(x, (0, 0, 0, 0, 0, segment_size - self.seq_len % segment_size), mode='replicate')) for x, segment_size, embed in zip(xs, self.segment_sizes, self.embed_layers)]
         xs = [self.pos_drop(x + self.positional_encoding(x)) for x in xs]
         return xs
 
@@ -399,7 +392,8 @@ class CrossScaleAggregator(nn.Module):
 
     def forward(self, xs, gates):
         # xs Ps * [B, T, S, D]
-        xs = [recovery_t(self.dropout(rearrange(x, 'b t (h w) d -> b d t h w', h=self.H, w=self.W)))[:, :, :self.seq_len] for x, recovery_t in zip(xs, self.reconvery_t_layers)] # -> Ps * [B, D, T, H, W]
+        xs = [rearrange(x, 'b t (h w) d -> b d t h w', h=self.H, w=self.W) for x in xs] # -> Ps * [B, D, T, H, W]
+        xs = [recovery_t(self.dropout(x))[:, :, :self.seq_len] for x, recovery_t in zip(xs, self.reconvery_t_layers)] # -> Ps * [B, D, T, H, W]
         xs = combine(xs, gates) # -> [B, D, T, H, W]
         xs = rearrange(xs, 'b d t h w -> b t h w d') # -> [B, T, H, W, D]
         xs = self.norm(self.activation(xs))
@@ -425,7 +419,7 @@ class Model(nn.Module):
         self.fourier_layer = FourierLayer(self.seq_len, configs.top_k, configs.enc_in, self.height, self.width, configs.dropout)
         self.segment_sizes = self.fourier_layer.segment_sizes
 
-        self.multi_scale_cube_embed = MultiScaleCubeEmbed(self.seq_len, self.segment_sizes, self.img_size, self.patch_size, configs.enc_in, configs.d_model, len(self.segment_sizes), configs.dropout, configs.stride_scale)
+        self.multi_scale_cube_embed = MultiScaleCubeEmbed(self.seq_len, self.segment_sizes, self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.dropout, configs.stride_scale)
 
         self.encoders = nn.ModuleList()
         for segment_size in self.segment_sizes:
@@ -433,9 +427,21 @@ class Model(nn.Module):
                 MSPTSTEncoder(
                     [
                         MSPTSTEncoderLayer(
-                            FullAttention(False, attention_dropout=configs.dropout),
-                            FullAttention(False, attention_dropout=configs.dropout),
-                            FullAttention(False, attention_dropout=configs.dropout),
+                            AttentionLayer(
+                                FullAttention(False, attention_dropout=configs.dropout),
+                                configs.d_model,
+                                configs.n_heads,
+                            ),
+                            AttentionLayer(
+                                FullAttention(False, attention_dropout=configs.dropout),
+                                configs.d_model,
+                                configs.n_heads,
+                            ),
+                            AttentionLayer(
+                                FullAttention(False, attention_dropout=configs.dropout),
+                                configs.d_model,
+                                configs.n_heads,
+                            ),
                             configs.d_model,
                             configs.d_ff,
                             configs.dropout,
@@ -459,7 +465,7 @@ class Model(nn.Module):
         xs = self.multi_scale_cube_embed(x_enc, gates)
 
         # encoding
-        xs = [encoder(x) for x, encoder in zip(xs, self.encoders)]
+        xs = [encoder(x)[0] for x, encoder in zip(xs, self.encoders)]
 
         # multi-scale cube recovery
         dec_out = self.patch_recovery(xs, gates)
