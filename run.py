@@ -65,6 +65,8 @@ if __name__ == '__main__':
                         help='time features encoding, options:[timeF, fixed, learned]')
     parser.add_argument('--activation', type=str, default='gelu', help='activation')
     parser.add_argument('--auxiliary_loss_weight', type=float, default=0.1, help='auxiliary loss weight')
+    
+    parser.add_argument('--stride_scale', type=int, default=1, help='stride scale')
 
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
