@@ -7,7 +7,7 @@ from math import ceil, log
 from einops import rearrange
 from timm.models.swin_transformer import WindowAttention, window_partition, window_reverse
 from timm.models.vision_transformer import Attention as VariableAttention
-from timm.layers import Mlp as MLP, LayerNorm2d, use_fused_attn, to_2tuple
+from timm.layers import Mlp, LayerNorm2d, use_fused_attn, to_2tuple
 
 # add layers to the system path ../../layers
 import sys
@@ -228,10 +228,10 @@ class FourierLayer(nn.Module):
         if self.position_wise:
             x = rearrange(x, 'b c t h w d -> (b h w) t (c d)')
         else:
-            x = rearrange(x, 'b c t h w d -> (b c t) h w d')
+            x = rearrange(x, 'b c t h w d -> (b c t) d h w')
             for embed_layer in self.embed_layers:
                 x = embed_layer(x)
-            x = rearrange(x, '(b c t) h w d -> b t (c h w d)', c=C, t=T)
+            x = rearrange(x, '(b c t) d h w -> b t (c h w d)', c=C, t=T)
         x = self.fuse_proj(x)
         x = self.fuse_drop(x)
 
@@ -285,6 +285,9 @@ class PeriodicAttentionLayer(nn.Module):
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, C, T, H, W, D] or [BHW, C, T, D]
+        if x.shape[0] == 0:
+            return x, None
+
         if self.position_wise:
             B, C, T, D = x.shape
             x = rearrange(x, 'b c t d -> (b c) t d')
@@ -326,7 +329,7 @@ class PeriodicAttentionLayer(nn.Module):
 
 
 class MultiScalePeriodicAttentionLayer(nn.Module):
-    def __init__(self, attention, gate_layer, d_model, n_heads, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., position_wise=False, individual=False):
+    def __init__(self, attention, gate_layer, seq_len, d_model, n_heads, learned_pe=False, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., pos_drop=0., position_wise=False, individual=False):
         super(MultiScalePeriodicAttentionLayer, self).__init__()
         assert d_model % n_heads == 0, 'd_model should be divisible by n_heads'
         self.gate_layer = gate_layer
@@ -337,12 +340,18 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
             self.attention_layers.append(
                 PeriodicAttentionLayer(
                     attention,
+                    seq_len,
+                    segment_size,
                     d_model,
                     n_heads,
+                    learned_pe=learned_pe,
                     qkv_bias=qkv_bias,
                     qk_norm=qk_norm,
                     proj_bias=proj_bias,
-                    proj_drop=proj_drop
+                    proj_drop=proj_drop,
+                    pos_drop=pos_drop,
+                    position_wise=position_wise,
+                    individual=individual
                 )
             )
 
@@ -363,13 +372,15 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         x = dispatch(x, gates) # Ps * [B, C, T, H, W, D] or Ps * [BHW, C, T, D]
         
         # multi-branch attention
+        xs = []
         attns = []
         for i, attention_layer in enumerate(self.attention_layers):
-            x[i], attn = attention_layer(x[i], attn_mask=attn_mask, tau=tau, delta=delta)
+            xi, attn = attention_layer(x[i], attn_mask=attn_mask, tau=tau, delta=delta)
+            xs.append(xi)
             attns.append(attn)
 
         # combine
-        x = combine(x, gates, position_wise=self.position_wise)
+        x = combine(xs, gates, position_wise=self.position_wise)
 
         # re-arrange
         if self.position_wise:
@@ -393,7 +404,7 @@ class MyWindowAttention(WindowAttention):
         """
         B_, N, C = x.shape
         qkv = self.qkv(x)
-        qkv = rearrange(qkv, 'b n (qkv h d) -> qkv b h n d', qkv=3, heads=self.num_heads)
+        qkv = rearrange(qkv, 'b n (qkv h d) -> qkv b h n d', qkv=3, h=self.num_heads)
         queries, keys, values = qkv.unbind(0)
         queries, keys = self.q_norm(queries), self.k_norm(keys)
 
@@ -438,7 +449,8 @@ class WindowAttentionLayer(nn.Module):
         self.always_partition = always_partition
         self.dynamic_mask = dynamic_mask
         self.window_size, self.shift_size = self._calc_window_shift(window_size, shift_size)
-
+        self.window_area = self.window_size[0] * self.window_size[1]
+        
         self.register_buffer(
             "attn_mask",
             None if self.dynamic_mask else self.get_attn_mask(),
@@ -537,7 +549,7 @@ class WindowAttentionLayer(nn.Module):
             attn_mask = self.get_attn_mask(shifted_x)
         else:
             attn_mask = self.attn_mask
-        attn_windows = self.inner_attention(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, D
+        attn_windows, attn = self.inner_attention(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, D
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size[0], self.window_size[1], D)
@@ -553,7 +565,7 @@ class WindowAttentionLayer(nn.Module):
         # re-arrange
         x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
 
-        return x
+        return x, attn
 
 
 class MSPSTTEncoderLayer(nn.Module):
@@ -564,8 +576,9 @@ class MSPSTTEncoderLayer(nn.Module):
         self.attention_v = attention_v
         self.attention_t = attention_t
         self.attention_s = attention_s
-        self.mlp_t = MLP(d_model, d_ff, dropout, activation)
-        self.mlp_s = MLP(d_model, d_ff, dropout, activation)
+        activation = nn.ReLU if activation == "relu" else nn.GELU
+        self.mlp_t = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
+        self.mlp_s = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
@@ -592,6 +605,8 @@ class MSPSTTEncoderLayer(nn.Module):
             # temporal attention
             if self.pre_norm:
                 x_t = self.norm2(x)
+            else:
+                x_t = x
             x_t, attn_t = self.attention_t(x_t, attn_mask=attn_mask, tau=tau, delta=delta)
             x_t = res_t + self.dropout(x_t)
             if not self.pre_norm:
@@ -609,7 +624,9 @@ class MSPSTTEncoderLayer(nn.Module):
             # spatial attention
             if self.pre_norm:
                 x_s = self.norm3(x)
-            x_s, attn_s = self.attention_s(x_s, mask=attn_mask)
+            else:
+                x_s = x
+            x_s, attn_s = self.attention_s(x_s)
             x_s = res_s + self.dropout(x_s)
             if not self.pre_norm:
                 x_s = self.norm3(x_s)
@@ -790,24 +807,27 @@ class Model(nn.Module):
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=False,
-                                    output_attention=False,
+                                    output_attention=configs.output_attention,
                                 ),
                                 FourierLayer(
                                     seq_len=configs.seq_len,
                                     top_k=configs.top_k,
                                     d_model=configs.d_model,
                                     in_chans=configs.enc_in,
-                                    img_size=self.img_size,
+                                    img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                     fuse_drop=configs.dropout,
                                     position_wise=configs.position_wise,
                                     individual=configs.individual,
                                 ),
+                                seq_len=configs.seq_len,
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
+                                learned_pe=False,
                                 qkv_bias=True,
                                 qk_norm=False,
                                 proj_bias=True,
                                 proj_drop=configs.dropout,
+                                pos_drop=configs.dropout,
                                 position_wise=False,
                                 individual=False,
                             ),
