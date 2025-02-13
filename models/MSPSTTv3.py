@@ -753,10 +753,13 @@ class MSPSTTDownEncoder(nn.Module):
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, C, T, H, W, D]
+        B, C, T, H, W, D = x.shape
         attns = []
 
         for encoder_layer, downsample in zip(self.encoder_layers, self.downsamples):
+            x = rearrange(x, 'b c t h w d -> (b c t) h w d')
             x = downsample(x)
+            x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
             x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
             attns.append(attn)
 
@@ -768,18 +771,21 @@ class MSPSTTDownEncoder(nn.Module):
 
 class MSPSTTUpEncoder(nn.Module):
     def __init__(self, encoder_layers, upsamples, norm_layer=None):
-        super(MSPSTTDownEncoder, self).__init__()
+        super(MSPSTTUpEncoder, self).__init__()
         self.encoder_layers = nn.ModuleList(encoder_layers)
         self.upsamples = nn.ModuleList(upsamples)
         self.norm = norm_layer
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, C, T, H, W, D]
+        B, C, T, H, W, D = x.shape
         attns = []
 
         for encoder_layer, upsample in zip(self.encoder_layers, self.upsamples):
             x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x = rearrange(x, 'b c t h w d -> (b c t) h w d')
             x = upsample(x)
+            x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
             attns.append(attn)
 
         if self.norm is not None:
