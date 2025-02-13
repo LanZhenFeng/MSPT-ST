@@ -875,14 +875,14 @@ class Model(nn.Module):
                         MSPSTTEncoderLayer(
                             VariableAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=False,
                                     output_attention=configs.output_attention,
                                 ),
                                 in_chans=configs.enc_in,
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**i,
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -893,7 +893,7 @@ class Model(nn.Module):
                             ) if self.individual else None,
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=False,
@@ -902,7 +902,7 @@ class Model(nn.Module):
                                 FourierLayer(
                                     seq_len=configs.seq_len,
                                     top_k=configs.top_k,
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     in_chans=configs.enc_in,
                                     img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                     fuse_drop=configs.dropout,
@@ -910,7 +910,7 @@ class Model(nn.Module):
                                     individual=configs.individual,
                                 ),
                                 seq_len=configs.seq_len,
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**i,
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -923,7 +923,7 @@ class Model(nn.Module):
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     window_size=window_size,
                                     qkv_bias=True,
@@ -938,7 +938,7 @@ class Model(nn.Module):
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            d_model=configs.d_model,
+                            d_model=configs.d_model * 2**i,
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
@@ -958,14 +958,14 @@ class Model(nn.Module):
                         MSPSTTEncoderLayer(
                             VariableAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=True,
                                     output_attention=configs.output_attention,
                                 ),
                                 in_chans=configs.enc_in,
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -976,7 +976,7 @@ class Model(nn.Module):
                             ) if self.individual else None,
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=True,
@@ -985,7 +985,7 @@ class Model(nn.Module):
                                 FourierLayer(
                                     seq_len=configs.seq_len,
                                     top_k=configs.top_k,
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                     in_chans=configs.enc_in,
                                     img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                     fuse_drop=configs.dropout,
@@ -993,7 +993,7 @@ class Model(nn.Module):
                                     individual=configs.individual,
                                 ),
                                 seq_len=configs.seq_len,
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -1006,7 +1006,7 @@ class Model(nn.Module):
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                     n_heads=configs.n_heads,
                                     window_size=window_size,
                                     qkv_bias=True,
@@ -1021,7 +1021,7 @@ class Model(nn.Module):
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            d_model=configs.d_model,
+                            d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
