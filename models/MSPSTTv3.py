@@ -567,6 +567,65 @@ class WindowAttentionLayer(nn.Module):
 
         return x, attn
 
+class PatchMerging(nn.Module):
+    """ Patch Merging Layer.
+    """
+
+    def __init__(self, dim, out_dim=None, norm_layer=nn.LayerNorm):
+        """
+        Args:
+            dim: Number of input channels.
+            out_dim: Number of output channels (or 2 * dim if None)
+            norm_layer: Normalization layer.
+        """
+        super().__init__()
+        self.dim = dim
+        self.out_dim = out_dim or 2 * dim
+        self.norm = norm_layer(4 * dim)
+        self.reduction = nn.Linear(4 * dim, self.out_dim, bias=False)
+
+    def forward(self, x):
+        B, H, W, C = x.shape
+
+        pad_values = (0, 0, 0, W % 2, 0, H % 2)
+        x = F.pad(x, pad_values)
+        _, H, W, _ = x.shape
+
+        x = x.reshape(B, H // 2, 2, W // 2, 2, C).permute(0, 1, 3, 4, 2, 5).flatten(3)
+        x = self.norm(x)
+        x = self.reduction(x)
+        return x
+
+
+class PatchExpanding(nn.Module):
+    r""" Patch Expanding Layer.
+
+    Args:
+        dim: Number of input channels.
+        out_dim: Number of output channels (or 2 * dim if None)
+        norm_layer: Normalization layer.
+        input_resolution (tuple[int]): Resolution of input feature.
+        dim (int): Number of input channels.
+        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
+    """
+
+    def __init__(self, dim, dim_scale=2, norm_layer=nn.LayerNorm):
+        super(PatchExpanding, self).__init__()
+        self.dim = dim
+        self.expand = nn.Linear(dim, 2 * dim, bias=False) if dim_scale == 2 else nn.Identity()
+        self.norm = norm_layer(dim // dim_scale)
+
+    def forward(self, x):
+        B, H, W, C = x.shape
+
+        x = self.expand(x)
+        x = x.reshape(B, H, W, 2, 2, C // 4)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B, H * 2, W * 2, C // 4)
+        x = x.view(B, -1, C // 4)
+        x = self.norm(x)
+
+        return x
+
 
 class MSPSTTEncoderLayer(nn.Module):
     # r"""Parallel Spatial-Temporal Attention Block with Shared Variable Attention"""
@@ -685,18 +744,42 @@ class MSPSTTEncoderLayer(nn.Module):
         return x, (attn_v, attn_t, attn_s)
     
 
-class MSPSTTEncoder(nn.Module):
-    def __init__(self, encoder_layers, norm_layer=None):
-        super(MSPSTTEncoder, self).__init__()
+class MSPSTTDownEncoder(nn.Module):
+    def __init__(self, encoder_layers, downsamples, norm_layer=None):
+        super(MSPSTTDownEncoder, self).__init__()
         self.encoder_layers = nn.ModuleList(encoder_layers)
+        self.downsamples = nn.ModuleList(downsamples)
         self.norm = norm_layer
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, C, T, H, W, D]
         attns = []
 
-        for encoder_layer in self.encoder_layers:
+        for encoder_layer, downsample in zip(self.encoder_layers, self.downsamples):
+            x = downsample(x)
             x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            attns.append(attn)
+
+        if self.norm is not None:
+            x = self.norm(x)
+
+        return x, attns
+
+
+class MSPSTTUpEncoder(nn.Module):
+    def __init__(self, encoder_layers, upsamples, norm_layer=None):
+        super(MSPSTTDownEncoder, self).__init__()
+        self.encoder_layers = nn.ModuleList(encoder_layers)
+        self.upsamples = nn.ModuleList(upsamples)
+        self.norm = norm_layer
+
+    def forward(self, x, attn_mask=None, tau=None, delta=None):
+        # x [B, C, T, H, W, D]
+        attns = []
+
+        for encoder_layer, upsample in zip(self.encoder_layers, self.upsamples):
+            x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x = upsample(x)
             attns.append(attn)
 
         if self.norm is not None:
@@ -759,7 +842,7 @@ class PatchRecovery(nn.Module):
 class Model(nn.Module):
     r'''
     
-    Multi-Scale Periodic Spatio-Temporal Transformer ------ SimVP Architecture
+    Multi-Scale Periodic Spatio-Temporal Transformer ------ Unet Architecture
     
     '''
     def __init__(self, configs, window_size=4): 
@@ -781,7 +864,7 @@ class Model(nn.Module):
 
         self.patch_embed = PatchEmbed(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
 
-        self.encoder = MSPSTTEncoder(
+        self.encoder = MSPSTTDownEncoder(
                     [
                         MSPSTTEncoderLayer(
                             VariableAttentionLayer(
@@ -858,7 +941,93 @@ class Model(nn.Module):
                         )
                         for i in range(configs.e_layers)
                     ],
-                    norm_layer=nn.LayerNorm(configs.d_model)
+                    [
+                        PatchMerging(configs.d_model * 2**i, norm_layer=nn.LayerNorm)
+                        for i in range(configs.e_layers)
+                    ],
+                )
+
+        self.decoder = MSPSTTUpEncoder(
+                    [
+                        MSPSTTEncoderLayer(
+                            VariableAttentionLayer(
+                                FullAttention(
+                                    d_model=configs.d_model,
+                                    n_heads=configs.n_heads,
+                                    attn_drop=configs.dropout,
+                                    is_causal=True,
+                                    output_attention=configs.output_attention,
+                                ),
+                                in_chans=configs.enc_in,
+                                d_model=configs.d_model,
+                                n_heads=configs.n_heads,
+                                learned_pe=False,
+                                qkv_bias=True,
+                                qk_norm=False,
+                                proj_bias=True,
+                                proj_drop=configs.dropout,
+                                pos_drop=configs.dropout,
+                            ) if self.individual else None,
+                            MultiScalePeriodicAttentionLayer(
+                                FullAttention(
+                                    d_model=configs.d_model,
+                                    n_heads=configs.n_heads,
+                                    attn_drop=configs.dropout,
+                                    is_causal=True,
+                                    output_attention=configs.output_attention,
+                                ),
+                                FourierLayer(
+                                    seq_len=configs.seq_len,
+                                    top_k=configs.top_k,
+                                    d_model=configs.d_model,
+                                    in_chans=configs.enc_in,
+                                    img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                    fuse_drop=configs.dropout,
+                                    position_wise=configs.position_wise,
+                                    individual=configs.individual,
+                                ),
+                                seq_len=configs.seq_len,
+                                d_model=configs.d_model,
+                                n_heads=configs.n_heads,
+                                learned_pe=False,
+                                qkv_bias=True,
+                                qk_norm=False,
+                                proj_bias=True,
+                                proj_drop=configs.dropout,
+                                pos_drop=configs.dropout,
+                                position_wise=False,
+                                individual=False,
+                            ),
+                            WindowAttentionLayer(
+                                MyWindowAttention(
+                                    d_model=configs.d_model,
+                                    n_heads=configs.n_heads,
+                                    window_size=window_size,
+                                    qkv_bias=True,
+                                    attn_drop=configs.dropout,
+                                    proj_drop=configs.dropout,
+                                    qk_norm=False,
+                                    output_attention=configs.output_attention,
+                                ),
+                                input_resolution=(configs.height // self.patch_size, configs.width // self.patch_size),
+                                window_size=window_size,
+                                shift_size=0 if (i % 2 == 0) else shift_size,
+                                always_partition=False,
+                                dynamic_mask=False,
+                            ),
+                            d_model=configs.d_model,
+                            d_ff=configs.d_ff,
+                            dropout=configs.dropout,
+                            activation=configs.activation,
+                            pre_norm=configs.pre_norm,
+                            is_parallel=configs.is_parallel,
+                        )
+                        for i in range(configs.e_layers)
+                    ],
+                    [
+                        PatchExpanding(configs.d_model * 2**(configs.e_layers - i - 1), norm_layer=nn.LayerNorm)
+                        for i in range(configs.e_layers)
+                    ],
                 )
 
         self.patch_recovery = PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
@@ -871,6 +1040,8 @@ class Model(nn.Module):
 
         # encoding
         enc_out, _ = self.encoder(x_embed) # -> [B, C, T, H, W, D]
+
+        enc_out, _ = self.decoder(enc_out) # -> [B, C, T, H, W, D]
 
         # decoding
         dec_out = self.patch_recovery(enc_out) # -> [B, T, H, W, C]
