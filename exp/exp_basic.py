@@ -1,14 +1,15 @@
 import os
 import torch
-from models import MSPT, MSPT_ST, ConvLSTM, E3DLSTM, MAU, MIM, PhyDNet, PredRNN, PredRNNPP, PredRNNv2, SwinLSTM_B, SwinLSTM_D, SimVP, TAU, PredFormer
-
+from models import MSPT, ConvLSTM, E3DLSTM, MAU, MIM, PhyDNet, PredRNN, PredRNNPP, PredRNNv2, SwinLSTM_B, SwinLSTM_D, SimVP, TAU, PredFormer
+from models import MSPSTT, MSPSTTv2
 
 class Exp_Basic(object):
     def __init__(self, args):
         self.args = args
         self.model_dict = {
             'MSPT': MSPT,
-            'MSPT_S': MSPT_ST,
+            'MSPSTT': MSPSTT,
+            'MSPSTTv2': MSPSTTv2,
             'ConvLSTM': ConvLSTM,
             'E3DLSTM': E3DLSTM,
             'MAU': MAU,

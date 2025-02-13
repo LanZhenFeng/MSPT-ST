@@ -40,6 +40,7 @@ if __name__ == '__main__':
 
     # model define
     parser.add_argument('--individual', action='store_true', help='channel independence', default=False)
+    parser.add_argument('--position_wise', action='store_true', help='position wise', default=False)
     parser.add_argument('--top_k', type=int, default=5, help='for TimesBlock')
     parser.add_argument('--num_kernels', type=int, default=6, help='for Inception')
     parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
@@ -65,8 +66,10 @@ if __name__ == '__main__':
                         help='time features encoding, options:[timeF, fixed, learned]')
     parser.add_argument('--activation', type=str, default='gelu', help='activation')
     parser.add_argument('--auxiliary_loss_weight', type=float, default=0.1, help='auxiliary loss weight')
-    
+    parser.add_argument('--output_attention', action='store_true', help='output attention weights', default=False)
     parser.add_argument('--stride_scale', type=int, default=1, help='stride scale')
+    parser.add_argument('--pre_norm', action='store_true', help='pre norm', default=False)
+    parser.add_argument('--is_parallel', action='store_true', help='parallel spatio-temporal attention or not', default=False)
 
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')

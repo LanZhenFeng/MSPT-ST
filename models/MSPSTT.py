@@ -74,39 +74,6 @@ class MLP(nn.Module):
         return x
 
 
-class GatedTransformerBlock(nn.Module):
-    def __init__(self, attention, d_model, d_ff=None, dropout=0.1, activation=nn.SiLU):
-        super(GatedTransformerBlock, self).__init__()
-        d_ff = d_ff or 4 * d_model
-        self.attention = attention
-        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-        self.conv2 = nn.Conv1d(in_channels=d_model, out_channels=d_ff, kernel_size=1)
-        self.conv3 = nn.Conv1d(in_channels=d_ff, out_channels=d_model, kernel_size=1)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
-        self.activation = activation()
-
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
-        # Attention
-        res = x
-        x = self.norm1(x)
-        x, attn = self.attention(
-            x, x, x,
-            attn_mask=attn_mask,
-            tau=tau, delta=delta
-        )
-        x = res + self.dropout(x)
-
-        # GLU
-        res = x
-        x = self.norm2(x)
-        x = self.dropout(self.activation(self.conv1(x.transpose(-1, 1))) * self.conv2(x.transpose(-1, 1)))
-        x = self.dropout(self.conv3(x).transpose(-1, 1))
-        x = res + x
-
-        return x, attn
-
 class MSPTSTEncoderLayer(nn.Module):
     def __init__(self, attention_v, attention_t, attention_s, d_model, d_ff=None, dropout=0.1, activation="relu"):
         super(MSPTSTEncoderLayer, self).__init__()
