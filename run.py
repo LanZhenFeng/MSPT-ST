@@ -198,5 +198,9 @@ if __name__ == '__main__':
 
         print('>>>>>>>calculate metrics : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
         exp.cal_metrics(setting)
-    
+        
+        print('>>>>>>>get params and flops : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+        exp.get_paramandflops()
+        torch.cuda.empty_cache()
+
      

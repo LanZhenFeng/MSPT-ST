@@ -166,6 +166,10 @@ class Exp_Main(Exp_Basic):
         if self.args.use_amp:
             scaler = torch.amp.GradScaler('cuda')
 
+        # reset memory stats
+        print("Resetting memory stats...")
+        torch.cuda.reset_peak_memory_stats(self.device)
+
         print("Starting training")
         for epoch in range(self.args.train_epochs):
             train_track = TrainTracking(self.args.train_epochs, train_steps)
@@ -233,6 +237,8 @@ class Exp_Main(Exp_Basic):
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
             early_stopping(vali_loss, self.model, self.model_save_path)
             print("Adjusting learning rate to: {:.7f}".format(scheduler.get_last_lr()[0]))
+            if self.device.type == "cuda":
+                print(f"memory footprint: {torch.cuda.max_memory_allocated(self.device) / 1024 ** 2:.3f} MB")
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
@@ -255,6 +261,12 @@ class Exp_Main(Exp_Basic):
     
         preds = []
         trues = []
+
+        # reset memory stats
+        print("Resetting memory stats...")
+        torch.cuda.reset_peak_memory_stats(self.device)
+
+        print("starting testing")
     
         self.model.eval()
 
@@ -315,6 +327,9 @@ class Exp_Main(Exp_Basic):
                     gt = true[0, :, ..., -1]
                     pd = pred[0, :, ..., -1]
                     visual_st(gt, pd, os.path.join(test_results_save_path, str(i) + '.pdf'))
+        
+        if self.device.type == "cuda":
+            print(f"memory footprint: {torch.cuda.max_memory_allocated(self.device) / 1024 ** 2:.3f} MB")
 
         preds = np.array(preds)
         trues = np.array(trues)
@@ -348,6 +363,26 @@ class Exp_Main(Exp_Basic):
         f.close()
 
         np.save(results_save_path + 'metrics.npy', np.array([mse, mae, rmse, pnsr, ssim]))
+
+    def get_paramandflops(self):
+        from thop import profile
+        from thop import clever_format
+        input = torch.randn(1, 30, 96, 64, 14)
+        input_mark = torch.randn(1, 30, 3)
+        dec_inp = torch.randn(1, 30, 96, 64, 14)
+        dec_inp_mark = torch.randn(1, 30, 3)
+        flops, params = profile(self.model,
+                                inputs=(input, input_mark, dec_inp,
+                                        dec_inp_mark))
+
+        flops_1 = f"{flops / 10**9:.3f}G"
+        params_1 = f"{params / 10**6:.3f}M"
+        print("-" * 50)
+        print(f"FLOPS: {flops_1}, Params: {params_1}")
+        print("-" * 50)
+        flops_2, params_2 = clever_format([flops, params], "%.3f")
+        print(f"FLOPS: {flops_2}, Params: {params_2}")
+        print("-" * 50)
 
     def get_model(self):
         return self.model.module if isinstance(self.model, nn.DataParallel) else self.model
