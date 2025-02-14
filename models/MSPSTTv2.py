@@ -146,9 +146,9 @@ class VariableAttentionLayer(nn.Module):
 
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
-        # x [B, C, T, H, W, D]
-        B, C, T, H, W, D = x.shape
-        x = rearrange(x, 'b c t h w d -> (b t h w) c d')
+        # x [B, T, C, H, W, D]
+        B, T, C, H, W, D = x.shape
+        x = rearrange(x, 'b t c h w d -> (b t h w) c d')
 
         # positional embedding
         if self.learned_pe:
@@ -173,7 +173,7 @@ class VariableAttentionLayer(nn.Module):
         x = rearrange(x, 'bthw h n d -> bthw n (h d)')
         x = self.proj(x)
         x = self.proj_drop(x)
-        x = rearrange(x, '(b t h w) c d -> b c t h w d', b=B, t=T, h=H, w=W)
+        x = rearrange(x, '(b t h w) c d -> b t c h w d', b=B, t=T, h=H, w=W)
         return x, attn
 
 
@@ -221,17 +221,17 @@ class FourierLayer(nn.Module):
         return segment_sizes
 
     def forward(self, x, training, noise_epsilon=1e-2):
-        # x [B, C, T, H, W, D]
-        B, C, T, H, W, D = x.shape
+        # x [B, T, C, H, W, D]
+        B, T, C, H, W, D = x.shape
 
         # embed & fuse
         if self.position_wise:
-            x = rearrange(x, 'b c t h w d -> (b h w) t (c d)')
+            x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
         else:
-            x = rearrange(x, 'b c t h w d -> (b c t) d h w')
+            x = rearrange(x, 'b t c h w d -> (b t c) d h w')
             for embed_layer in self.embed_layers:
                 x = embed_layer(x)
-            x = rearrange(x, '(b c t) d h w -> b t (c h w d)', c=C, t=T)
+            x = rearrange(x, '(b t c) d h w -> b t (c h w d)', c=C, t=T)
         x = self.fuse_proj(x)
         x = self.fuse_drop(x)
 
@@ -284,16 +284,16 @@ class PeriodicAttentionLayer(nn.Module):
         self.pos_drop = nn.Dropout(pos_drop)
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
-        # x [B, C, T, H, W, D] or [BHW, C, T, D]
+        # x [B, T, C, H, W, D] or [BHW, T, C, D]
         if x.shape[0] == 0:
             return x, None
 
         if self.position_wise:
-            B, C, T, D = x.shape
-            x = rearrange(x, 'b c t d -> (b c) t d')
+            B, T, C, D = x.shape
+            x = rearrange(x, 'b t c d -> (b c) t d')
         else:
-            B, C, T, H, W, D = x.shape
-            x = rearrange(x, 'b c t h w d -> (b c h w) t d')
+            B, T, C, H, W, D = x.shape
+            x = rearrange(x, 'b t c h w d -> (b c h w) t d')
 
         # segment
         padding_len = T - T % self.segment_size if T % self.segment_size != 0 else 0
@@ -321,9 +321,9 @@ class PeriodicAttentionLayer(nn.Module):
 
         x = rearrange(x, 'b n (p d) -> b (n p) d', p=self.segment_size)[:,:T]
         if self.position_wise:
-            x = rearrange(x, '(b c) t d -> b c t d', c=C)
+            x = rearrange(x, '(b c) t d -> b t c d', c=C)
         else:
-            x = rearrange(x, '(b c h w) t d -> b c t h w d', c=C, h=H, w=W)
+            x = rearrange(x, '(b c h w) t d -> b t c h w d', c=C, h=H, w=W)
 
         return x, attn
 
@@ -358,18 +358,18 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         self.position_wise = position_wise
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
-        # x [B, C, T, H, W, D]
-        B, C, T, H, W, D = x.shape
+        # x [B, T, C, H, W, D]
+        B, T, C, H, W, D = x.shape
 
         # gating
         gates = self.gate_layer(x, training=self.training) # [B, Ps]
 
         # re-arrange
         if self.position_wise:
-            x = rearrange(x, 'b c t h w d -> (b h w) c t d')
+            x = rearrange(x, 'b t c h w d -> (b h w) t c d')
 
         # dispatch
-        x = dispatch(x, gates) # Ps * [B, C, T, H, W, D] or Ps * [BHW, C, T, D]
+        x = dispatch(x, gates) # Ps * [B, T, C, H, W, D] or Ps * [BHW, T, C, D]
         
         # multi-branch attention
         xs = []
@@ -384,7 +384,7 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
 
         # re-arrange
         if self.position_wise:
-            x = rearrange(x, '(b h w) c t d -> b c t h w d', h=H, w=W)
+            x = rearrange(x, '(b h w) t c d -> b t c h w d', h=H, w=W)
 
         return x, attns
 
@@ -521,11 +521,11 @@ class WindowAttentionLayer(nn.Module):
         )
 
     def forward(self, x):
-        # x [B, C, T, H, W, D]
-        B, C, T, H, W, D = x.shape
+        # x [B, T, C, H, W, D]
+        B, T, C, H, W, D = x.shape
         
         # re-arrange
-        x = rearrange(x, 'b c t h w d -> (b c t) h w d')
+        x = rearrange(x, 'b t c h w d -> (b t c) h w d')
 
         # cyclic shift
         has_shift = any(self.shift_size)
@@ -563,7 +563,7 @@ class WindowAttentionLayer(nn.Module):
             x = shifted_x
 
         # re-arrange
-        x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
+        x = rearrange(x, '(b t c) h w d -> b t c h w d', b=B, c=C, t=T)
 
         return x, attn
 
@@ -588,8 +588,8 @@ class MSPSTTEncoderLayer(nn.Module):
         self.is_parallel = is_parallel
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
-        # x [B, C, T, H, W, D]
-        # B, C, T, H, W, D = x.shape
+        # x [B, T, C, H, W, D]
+        # B, T, C, H, W, D = x.shape
         # variable attention
         if self.attention_v is not None:
             res = x
@@ -599,6 +599,8 @@ class MSPSTTEncoderLayer(nn.Module):
             x = res + self.dropout(x)
             if not self.pre_norm:
                 x = self.norm1(x)
+        else:
+            attn_v = None
 
         if self.is_parallel:
             ## parallel spatial attention and temporal attention
@@ -692,7 +694,7 @@ class MSPSTTEncoder(nn.Module):
         self.norm = norm_layer
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
-        # x [B, C, T, H, W, D]
+        # x [B, T, C, H, W, D]
         attns = []
 
         for encoder_layer in self.encoder_layers:
@@ -724,9 +726,9 @@ class PatchEmbed(nn.Module):
             x = rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.proj(x)
         if self.individual:
-            x = rearrange(x, '(b t c) d h w -> b c t h w d', t=T, c=C)
+            x = rearrange(x, '(b t c) d h w -> b t c h w d', t=T, c=C)
         else:
-            x = rearrange(x, '(b t) d h w -> b () t h w d', t=T)
+            x = rearrange(x, '(b t) d h w -> b t () h w d', t=T)
         return x
 
 
@@ -742,17 +744,17 @@ class PatchRecovery(nn.Module):
         self.proj = nn.ConvTranspose2d(embed_dim, 1, kernel_size=patch_size, stride=patch_size) if individual else nn.ConvTranspose2d(embed_dim, in_chans, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        # x [B, C, T, H, W, D]
-        B, C, T, H, W, D = x.shape
-        if self.individual:
-            x = rearrange(x, 'b c t h w d -> (b t c) d h w')
-        else:
-            x = rearrange(x, 'b c t h w d -> (b t) d h w')
+        # x [B, T, C, H, W, D]
+        B, T, C, H, W, D = x.shape
+        # if self.individual:
+            # x = rearrange(x, 'b t c h w d -> (b t c) d h w')
+        # else:
+        x = rearrange(x, 'b t c h w d -> (b t c) d h w')
         x = self.proj(x)
         if self.individual:
             x = rearrange(x, '(b t c) d h w -> b t h w (c d)', t=T, c=C)
         else:
-            x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
+            x = rearrange(x, '(b t c) d h w -> b t h w (c d)', t=T, c=1)
         return x
 
 
@@ -867,10 +869,10 @@ class Model(nn.Module):
         # x_enc [B, T, H, W, C]
 
         # patch embedding
-        x_embed = self.patch_embed(x_enc) # -> [B, C, T, H, W, D] C=1 if individual=True else enc_in
-
+        x_embed = self.patch_embed(x_enc) # -> [B, T, C, H, W, D] C=1 if individual=True else enc_in
+        
         # encoding
-        enc_out, _ = self.encoder(x_embed) # -> [B, C, T, H, W, D]
+        enc_out, _ = self.encoder(x_embed) # -> [B, T, C, H, W, D]
 
         # decoding
         dec_out = self.patch_recovery(enc_out) # -> [B, T, H, W, C]
