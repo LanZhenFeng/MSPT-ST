@@ -43,14 +43,12 @@ def combine(expert_out, gates, multiply_by_gates=True):
     # apply exp to expert outputs, so we are not longer in log space
     stitched = torch.cat(expert_out, 0).exp()
     if multiply_by_gates:
-        stitched = torch.einsum("bdthw,bk -> bdthw", stitched, _nonzero_gates)
-    zeros = torch.zeros(gates.size(0),
-                        expert_out[-1].size(1),
-                        expert_out[-1].size(2),
-                        expert_out[-1].size(3),
-                        expert_out[-1].size(4),
-                        requires_grad=True,
-                        device=stitched.device)
+        dims_stitched = stitched.dim()
+        dims_nonzero_gates = _nonzero_gates.dim()
+        for i in range(dims_stitched - dims_nonzero_gates):
+            _nonzero_gates = _nonzero_gates.unsqueeze(-1)
+        stitched = stitched * _nonzero_gates
+    zeros = torch.zeros(gates.size(0), *expert_out[-1].shape[1:], requires_grad=True, device=stitched.device)
     # combine samples that have been processed by the same k experts
     combined = zeros.index_add(0, _batch_index, stitched.float())
     # add eps to all zero values in order to avoid nans when going back to log space
@@ -457,9 +455,11 @@ class Model(nn.Module):
             return y, None
 
 if __name__ == "__main__":
-    export_outs = []
-    for i in range(5):
-        export_out = torch.randn(2, 32, 3, 12, 12)
-        export_outs.append(export_out)
-    gates = torch.randn(2, 5)
-    combine(export_outs, gates)
+    x = torch.randn(2, 3, 3, 2, 2, 4)
+    gates = torch.zeros(2, 5)
+    gates[0, 0] = 0.8
+    gates[0, 1] = 0.2
+    gates[1, 4] = 0.6
+    gates[1, 3] = 0.4
+    xs = dispatch(x, gates)
+    combine(xs, gates)

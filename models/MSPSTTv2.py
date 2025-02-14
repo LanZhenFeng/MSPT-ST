@@ -844,8 +844,6 @@ class Model(nn.Module):
         self.width = configs.width
         self.img_size = tuple([configs.height, configs.width])
         self.patch_size = configs.patch_size
-        window_size = to_2tuple(window_size)
-        # shift_size = tuple([w // 2 for w in window_size])
         self.individual = configs.individual
         assert self.height % self.patch_size == 0, "Height must be divisible by patch size"
         assert self.width % self.patch_size == 0, "Width must be divisible by patch size"
