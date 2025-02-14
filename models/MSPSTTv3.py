@@ -617,11 +617,10 @@ class PatchExpanding(nn.Module):
 
     def forward(self, x):
         B, H, W, C = x.shape
-
         x = self.expand(x)
-        x = x.reshape(B, H, W, 2, 2, C // 4)
-        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B, H * 2, W * 2, C // 4)
-        x = x.view(B, -1, C // 4)
+        D = x.shape[-1]
+        x = x.reshape(B, H, W, 2, 2, D // 4)
+        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B, H * 2, W * 2, D // 4)
         x = self.norm(x)
 
         return x
@@ -757,10 +756,15 @@ class MSPSTTDownEncoder(nn.Module):
         attns = []
 
         for encoder_layer, downsample in zip(self.encoder_layers, self.downsamples):
-            x = rearrange(x, 'b c t h w d -> (b c t) h w d')
-            x = downsample(x)
-            x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
+            # print(f"Downsample 1: {x.shape}")
             x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            # print(f"Downsample 2: {x.shape}")
+            x = rearrange(x, 'b c t h w d -> (b c t) h w d')
+            # print(f"Downsample 3: {x.shape}")
+            x = downsample(x)
+            # print(f"Downsample 4: {x.shape}")
+            x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
+            # print(f"Downsample 5: {x.shape}")
             attns.append(attn)
 
         if self.norm is not None:
@@ -782,10 +786,15 @@ class MSPSTTUpEncoder(nn.Module):
         attns = []
 
         for encoder_layer, upsample in zip(self.encoder_layers, self.upsamples):
+            # print(f"Upsample 1: {x.shape}")
             x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            # print(f"Upsample 2: {x.shape}")
             x = rearrange(x, 'b c t h w d -> (b c t) h w d')
+            # print(f"Upsample 3: {x.shape}")
             x = upsample(x)
+            # print(f"Upsample 4: {x.shape}")
             x = rearrange(x, '(b c t) h w d -> b c t h w d', b=B, c=C, t=T)
+            # print(f"Upsample 5: {x.shape}")
             attns.append(attn)
 
         if self.norm is not None:
@@ -904,7 +913,7 @@ class Model(nn.Module):
                                     top_k=configs.top_k,
                                     d_model=configs.d_model * 2**i,
                                     in_chans=configs.enc_in,
-                                    img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                    img_size=((configs.height//self.patch_size)//2**i, (configs.width//self.patch_size)//2**i),
                                     fuse_drop=configs.dropout,
                                     position_wise=configs.position_wise,
                                     individual=configs.individual,
@@ -932,7 +941,7 @@ class Model(nn.Module):
                                     qk_norm=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                input_resolution=(configs.height // self.patch_size, configs.width // self.patch_size),
+                                input_resolution=((configs.height//self.patch_size)//2**i, (configs.width//self.patch_size)//2**i),
                                 window_size=window_size,
                                 shift_size=0 if (i % 2 == 0) else shift_size,
                                 always_partition=False,
@@ -958,14 +967,14 @@ class Model(nn.Module):
                         MSPSTTEncoderLayer(
                             VariableAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                                    d_model=configs.d_model * 2**(configs.e_layers - i),
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=True,
                                     output_attention=configs.output_attention,
                                 ),
                                 in_chans=configs.enc_in,
-                                d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                                d_model=configs.d_model * 2**(configs.e_layers - i),
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -976,7 +985,7 @@ class Model(nn.Module):
                             ) if self.individual else None,
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                                    d_model=configs.d_model * 2**(configs.e_layers - i),
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=True,
@@ -985,15 +994,15 @@ class Model(nn.Module):
                                 FourierLayer(
                                     seq_len=configs.seq_len,
                                     top_k=configs.top_k,
-                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                                    d_model=configs.d_model * 2**(configs.e_layers - i),
                                     in_chans=configs.enc_in,
-                                    img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                    img_size=((configs.height//self.patch_size)//2**(configs.e_layers - i), (configs.width//self.patch_size)//2**(configs.e_layers - i)),
                                     fuse_drop=configs.dropout,
                                     position_wise=configs.position_wise,
                                     individual=configs.individual,
                                 ),
                                 seq_len=configs.seq_len,
-                                d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                                d_model=configs.d_model * 2**(configs.e_layers - i),
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -1006,7 +1015,7 @@ class Model(nn.Module):
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
-                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                                    d_model=configs.d_model * 2**(configs.e_layers - i),
                                     n_heads=configs.n_heads,
                                     window_size=window_size,
                                     qkv_bias=True,
@@ -1015,13 +1024,13 @@ class Model(nn.Module):
                                     qk_norm=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                input_resolution=(configs.height // self.patch_size, configs.width // self.patch_size),
+                                input_resolution=((configs.height//self.patch_size)//2**(configs.e_layers - i), (configs.width//self.patch_size)//2**(configs.e_layers - i)),
                                 window_size=window_size,
                                 shift_size=0 if (i % 2 == 0) else shift_size,
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            d_model=configs.d_model * 2**(configs.e_layers - i - 1),
+                            d_model=configs.d_model * 2**(configs.e_layers - i),
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
@@ -1031,9 +1040,10 @@ class Model(nn.Module):
                         for i in range(configs.e_layers)
                     ],
                     [
-                        PatchExpanding(configs.d_model * 2**(configs.e_layers - i - 1), norm_layer=nn.LayerNorm)
+                        PatchExpanding(configs.d_model * 2**(configs.e_layers - i), norm_layer=nn.LayerNorm)
                         for i in range(configs.e_layers)
                     ],
+                    norm_layer=nn.LayerNorm(configs.d_model)
                 )
 
         self.patch_recovery = PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
