@@ -188,25 +188,37 @@ class FourierLayer(nn.Module):
         
         # get the segment sizes
         self.segment_sizes = self.get_segment_sizes(seq_len)
-        # get the Highest Common Factor
-        hcf = np.gcd(self.height, self.width).astype(int)
-        self.num_embed_layers = np.log2(hcf).astype(int)
-        self.embed_layers = nn.ModuleList()
-        for i in range(self.num_embed_layers):
-            input_size = d_model * 2**i
-            output_size = d_model * 2**(i+1)
-            self.embed_layers.append(
-                nn.Sequential(
-                    nn.Conv2d(in_channels=input_size, out_channels=output_size, kernel_size=2, stride=2), 
-                    nn.GELU(),
-                    nn.BatchNorm2d(output_size),
-                )
-            )
+        # # get the Highest Common Factor
+        # hcf = np.gcd(self.height, self.width).astype(int)
+        # self.num_embed_layers = np.log2(hcf).astype(int)
+        # self.embed_layers = nn.ModuleList()
+        # for i in range(self.num_embed_layers):
+        #     input_size = d_model * 2**i
+        #     output_size = d_model * 2**(i+1)
+        #     self.embed_layers.append(
+        #         nn.Sequential(
+        #             nn.Conv2d(in_channels=input_size, out_channels=output_size, kernel_size=2, stride=2), 
+        #             nn.GELU(),
+        #             nn.BatchNorm2d(output_size),
+        #         )
+        #     )
 
-        in_chans = in_chans if individual else 1
-        input_size = in_chans * d_model if position_wise else d_model * in_chans * 2**self.num_embed_layers * self.height//2**self.num_embed_layers * self.width//2**self.num_embed_layers
-        self.fuse_proj = nn.Linear(input_size, 512)
-        self.fuse_drop = nn.Dropout(fuse_drop)
+        # in_chans = in_chans if individual else 1
+        # input_size = in_chans * d_model if position_wise else d_model * in_chans * 2**self.num_embed_layers * self.height//2**self.num_embed_layers * self.width//2**self.num_embed_layers
+        # self.fuse_proj = nn.Linear(input_size, 512)
+        # self.fuse_drop = nn.Dropout(fuse_drop)
+
+        # if not position_wise:
+        #     self.squeeze_layer = nn.Sequential(
+        #         nn.Conv2d(in_channels=d_model, out_channels=d_model*4, kernel_size=4, stride=2, padding=1),
+        #         nn.GroupNorm(16, d_model*4),
+        #         nn.LeakyReLU(0.2, inplace=True),
+        #         nn.AdaptiveAvgPool2d((1, 1)),
+        #         nn.Conv2d(in_channels=d_model*4, out_channels=d_model, kernel_size=1, stride=1),
+        #         nn.Flatten()
+        #     )
+        
+        self.in_proj = nn.Linear(in_chans * d_model, 512) if individual else nn.Linear(d_model, 512)
 
         # Noise parameters
         self.w_gate = nn.Parameter(torch.zeros(self.num_freqs, len(self.segment_sizes)))
@@ -224,16 +236,29 @@ class FourierLayer(nn.Module):
         # x [B, T, C, H, W, D]
         B, T, C, H, W, D = x.shape
 
-        # embed & fuse
+        # # embed & fuse
+        # if self.position_wise:
+        #     x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
+        # else:
+        #     x = rearrange(x, 'b t c h w d -> (b t c) d h w')
+        #     for embed_layer in self.embed_layers:
+        #         x = embed_layer(x)
+        #     x = rearrange(x, '(b t c) d h w -> b t (c h w d)', c=C, t=T)
+        # x = self.fuse_proj(x)
+        # x = self.fuse_drop(x)
+        # if self.position_wise:
+        #     x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
+        # else:
+        #     x = rearrange(x, 'b t c h w d -> (b t c) d h w')
+        #     x = self.squeeze_layer(x) # -> [BTC, D]
+        #     x = rearrange(x, '(b t c) d -> b t (c d)', t=T, c=C)
+        # x = self.in_proj(x)
         if self.position_wise:
             x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
         else:
-            x = rearrange(x, 'b t c h w d -> (b t c) d h w')
-            for embed_layer in self.embed_layers:
-                x = embed_layer(x)
-            x = rearrange(x, '(b t c) d h w -> b t (c h w d)', c=C, t=T)
-        x = self.fuse_proj(x)
-        x = self.fuse_drop(x)
+            x = rearrange(x, 'b t c h w d -> b t (h w) (c d)')
+            x = x.mean(-2) 
+        x = self.in_proj(x)
 
         # fft
         x = rearrange(x, 'b t d -> b d t')
@@ -582,10 +607,13 @@ class MSPSTTEncoderLayer(nn.Module):
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)
-        self.fusion_st = nn.Linear(d_model*2, d_model)
+        # self.fusion_st = nn.Linear(d_model*2, d_model)
         self.dropout = nn.Dropout(dropout)
         self.pre_norm = pre_norm
         self.is_parallel = is_parallel
+
+        self.fusion_st = Mlp(in_features=d_model*2, hidden_features=d_ff, out_features=d_model, act_layer=activation, drop=dropout)
+        self.norm4 = nn.LayerNorm(d_model)
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, T, C, H, W, D]
@@ -604,7 +632,7 @@ class MSPSTTEncoderLayer(nn.Module):
 
         if self.is_parallel:
             ## parallel spatial attention and temporal attention
-            res_t = res_s = x
+            res_t = res_s = res = x
             # temporal attention
             if self.pre_norm:
                 x_t = self.norm2(x)
@@ -645,42 +673,49 @@ class MSPSTTEncoderLayer(nn.Module):
 
             # combine
             x = torch.cat([x_t, x_s], dim=-1)
+            # x = self.fusion_st(x)
+            if self.pre_norm:
+                x = self.norm4(x)
             x = self.fusion_st(x)
+            x = res + self.dropout(x)
+            if not self.pre_norm:
+                x = self.norm4(x)
 
         else:
             ## serial spatial attention and temporal attention
-            res_t = res_s = x
+            res = x
             # temporal attention
             if self.pre_norm:
                 x = self.norm2(x)
             x, attn_t = self.attention_t(x, attn_mask=attn_mask, tau=tau, delta=delta)
-            x = res_t + self.dropout(x)
+            x = res + self.dropout(x)
             if not self.pre_norm:
                 x = self.norm2(x)
 
             # temporal mlp
-            res_t = x
+            res = x
             if self.pre_norm:
                 x = self.norm3(x)
             x = self.mlp_t(x)
-            x = res_t + self.dropout(x)
+            x = res + self.dropout(x)
             if not self.pre_norm:
                 x = self.norm3(x)
 
             # spatial attention
+            res = x
             if self.pre_norm:
                 x = self.norm3(x)
             x, attn_s = self.attention_s(x, mask=attn_mask)
-            x = res_s + self.dropout(x)
+            x = res + self.dropout(x)
             if not self.pre_norm:
                 x = self.norm3(x)
 
             # spatial mlp
-            res_s = x
+            res = x
             if self.pre_norm:
                 x = self.norm3(x)
             x = self.mlp_s(x)
-            x = res_s + self.dropout(x)
+            x = res + self.dropout(x)
             if not self.pre_norm:
                 x = self.norm3(x)
 
@@ -746,15 +781,50 @@ class PatchRecovery(nn.Module):
     def forward(self, x):
         # x [B, T, C, H, W, D]
         B, T, C, H, W, D = x.shape
-        # if self.individual:
-            # x = rearrange(x, 'b t c h w d -> (b t c) d h w')
-        # else:
         x = rearrange(x, 'b t c h w d -> (b t c) d h w')
         x = self.proj(x)
-        if self.individual:
-            x = rearrange(x, '(b t c) d h w -> b t h w (c d)', t=T, c=C)
-        else:
-            x = rearrange(x, '(b t c) d h w -> b t h w (c d)', t=T, c=1)
+        x = rearrange(x, '(b t c) d h w -> b t h w (c d)', t=T, c=C)
+        return x
+
+
+class PatchInflated(nn.Module):
+    r""" Tensor to Patch Inflating
+
+    Args:
+        in_chans (int): Number of input image channels.
+        embed_dim (int): Number of linear projection output channels.
+        input_resolution (tuple[int]): Input resulotion.
+    """
+
+    def __init__(self, patch_size, in_chans, embed_dim, stride=2, padding=1, output_padding=1, individual=False):
+        super(PatchInflated, self).__init__()
+
+        num_layers = np.log2(patch_size).astype(int) - 1
+        stride = to_2tuple(stride)
+        padding = to_2tuple(padding)
+        output_padding = to_2tuple(output_padding)
+
+        self.Convs = nn.ModuleList()
+        for i in range(num_layers):
+            self.Convs.append(nn.Sequential(
+                nn.ConvTranspose2d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding),
+                nn.GroupNorm(16, embed_dim),
+                nn.LeakyReLU(0.2, inplace=True)
+            ))
+
+        out_chans = in_chans if individual else 1
+        self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding))
+
+        self.individual = individual
+
+    def forward(self, x):
+        B, T, C, H, W, D = x.shape
+
+        x = rearrange(x, 'b t c h w d -> (b t c) d h w')
+        for conv_layer in self.Convs:
+            x = conv_layer(x)
+        x = rearrange(x, '(b t c) d h w -> b t h w (c d)', t=T, c=C)
+        
         return x
 
 
@@ -863,7 +933,8 @@ class Model(nn.Module):
                     norm_layer=nn.LayerNorm(configs.d_model)
                 )
 
-        self.patch_recovery = PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
+        # self.patch_recovery = PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
+        self.patch_recovery = PatchInflated(self.patch_size, configs.enc_in, configs.d_model, stride=2, padding=1, output_padding=1, individual=configs.individual)
 
     def forward_core(self, x_enc):
         # x_enc [B, T, H, W, C]
