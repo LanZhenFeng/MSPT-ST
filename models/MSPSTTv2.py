@@ -19,7 +19,7 @@ parent_dir = os.path.dirname(current_dir)
 # 将上上层目录添加到 sys.path
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
-from layers.Embed import PositionalEmbedding, PositionalEmbedding2D
+from layers.Embed import PositionalEmbedding, PositionalEmbedding2D, TemporalEmbedding, TimeFeatureEmbedding
 
 def dispatch(inp, gates):
     # sort experts
@@ -33,7 +33,19 @@ def dispatch(inp, gates):
     return torch.split(inp_exp, _part_sizes, dim=0)
 
 
-def combine(expert_out, gates, position_wise=False, multiply_by_gates=True):
+def dispatch(inp, gates):
+    # sort experts
+    _, index_sorted_experts = torch.nonzero(gates).sort(0)
+    # get according batch index for each expert
+    _batch_index = torch.nonzero(gates)[index_sorted_experts[:, 1], 0]
+    _part_sizes = (gates > 0).sum(0).tolist()
+    # assigns samples to experts whose gate is nonzero
+    # expand according to batch index so we can just split by _part_sizes
+    inp_exp = inp[_batch_index].squeeze(1)
+    return torch.split(inp_exp, _part_sizes, dim=0)
+
+
+def combine(expert_out, gates, multiply_by_gates=True):
     # sort experts
     sorted_experts, index_sorted_experts = torch.nonzero(gates).sort(0)
     _, _expert_index = sorted_experts.split(1, dim=1)
@@ -44,41 +56,18 @@ def combine(expert_out, gates, position_wise=False, multiply_by_gates=True):
     # apply exp to expert outputs, so we are not longer in log space
     stitched = torch.cat(expert_out, 0).exp()
     if multiply_by_gates:
-        if position_wise:
-            stitched = torch.einsum("bctd,bk -> bctd", stitched, _nonzero_gates)
-        else:
-            stitched = torch.einsum("bcthwd,bk -> bcthwd", stitched, _nonzero_gates)
-    if position_wise:
-        zeros = torch.zeros(gates.size(0),
-                            expert_out[-1].size(1),
-                            expert_out[-1].size(2),
-                            expert_out[-1].size(3),
-                            requires_grad=True,
-                            device=stitched.device)
-    else:
-        zeros = torch.zeros(gates.size(0),
-                            expert_out[-1].size(1),
-                            expert_out[-1].size(2),
-                            expert_out[-1].size(3),
-                            expert_out[-1].size(4),
-                            expert_out[-1].size(5),
-                            requires_grad=True,
-                            device=stitched.device)
+        dims_stitched = stitched.dim()
+        dims_nonzero_gates = _nonzero_gates.dim()
+        for i in range(dims_stitched - dims_nonzero_gates):
+            _nonzero_gates = _nonzero_gates.unsqueeze(-1)
+        stitched = stitched * _nonzero_gates
+    zeros = torch.zeros(gates.size(0), *expert_out[-1].shape[1:], requires_grad=True, device=stitched.device)
     # combine samples that have been processed by the same k experts
     combined = zeros.index_add(0, _batch_index, stitched.float())
     # add eps to all zero values in order to avoid nans when going back to log space
     combined[combined == 0] = np.finfo(float).eps
     # back to log space
     return combined.log()
-
-
-class Permute(nn.Module):
-    def __init__(self, *dims):
-        super().__init__()
-        self.dims = dims
-    
-    def forward(self, x):
-        return x.permute(*self.dims)
 
 
 class FullAttention(nn.Module):
@@ -144,6 +133,9 @@ class VariableAttentionLayer(nn.Module):
         self.pos_embed = nn.Parameter(torch.zeros(1, in_chans, d_model)) if learned_pe else PositionalEmbedding(d_model)
         self.pos_drop = nn.Dropout(pos_drop)
 
+        # weight initialization
+        if learned_pe:
+            nn.init.trunc_normal_(self.pos_embed, std=.02)
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, T, C, H, W, D]
@@ -188,41 +180,38 @@ class FourierLayer(nn.Module):
         
         # get the segment sizes
         self.segment_sizes = self.get_segment_sizes(seq_len)
-        # # get the Highest Common Factor
-        # hcf = np.gcd(self.height, self.width).astype(int)
-        # self.num_embed_layers = np.log2(hcf).astype(int)
-        # self.embed_layers = nn.ModuleList()
-        # for i in range(self.num_embed_layers):
-        #     input_size = d_model * 2**i
-        #     output_size = d_model * 2**(i+1)
-        #     self.embed_layers.append(
-        #         nn.Sequential(
-        #             nn.Conv2d(in_channels=input_size, out_channels=output_size, kernel_size=2, stride=2), 
-        #             nn.GELU(),
-        #             nn.BatchNorm2d(output_size),
-        #         )
-        #     )
+        # get the number of convolutional layers
+        self.num_conv_layers, self.hw = self.get_num_conv_layers()
+        # convolutional layers
+        self.Convs = nn.ModuleList()
+        for i in range(self.num_conv_layers):
+            self.Convs.append(
+                nn.Sequential(
+                    nn.Conv2d(in_channels=d_model, out_channels=d_model, kernel_size=2, stride=2), 
+                    # nn.BatchNorm2d(d_model),
+                    LayerNorm2d(d_model),
+                    nn.SiLU(inplace=True)
+                )
+            )
 
-        # in_chans = in_chans if individual else 1
-        # input_size = in_chans * d_model if position_wise else d_model * in_chans * 2**self.num_embed_layers * self.height//2**self.num_embed_layers * self.width//2**self.num_embed_layers
-        # self.fuse_proj = nn.Linear(input_size, 512)
-        # self.fuse_drop = nn.Dropout(fuse_drop)
-
-        # if not position_wise:
-        #     self.squeeze_layer = nn.Sequential(
-        #         nn.Conv2d(in_channels=d_model, out_channels=d_model*4, kernel_size=4, stride=2, padding=1),
-        #         nn.GroupNorm(16, d_model*4),
-        #         nn.LeakyReLU(0.2, inplace=True),
-        #         nn.AdaptiveAvgPool2d((1, 1)),
-        #         nn.Conv2d(in_channels=d_model*4, out_channels=d_model, kernel_size=1, stride=1),
-        #         nn.Flatten()
-        #     )
-        
-        self.in_proj = nn.Linear(in_chans * d_model, 512) if individual else nn.Linear(d_model, 512)
+        self.in_chans = in_chans if individual else 1
+        input_size = self.in_chans * d_model if position_wise else self.in_chans * d_model * self.hw
+        self.fuse_proj = nn.Linear(input_size, d_model)
+        self.fuse_drop = nn.Dropout(fuse_drop)
 
         # Noise parameters
         self.w_gate = nn.Parameter(torch.zeros(self.num_freqs, len(self.segment_sizes)))
         self.w_noise = nn.Parameter(torch.zeros(self.num_freqs, len(self.segment_sizes)))
+
+    def get_num_conv_layers(self):
+        ks = 2
+        num_layers = 0
+        height, width = self.height, self.width
+        while height % ks == 0 and width % ks == 0:
+            num_layers += 1
+            height //= ks
+            width //= ks
+        return num_layers, height*width
 
     def get_segment_sizes(self, seq_len):
         # get the period list, first element is inf
@@ -235,37 +224,25 @@ class FourierLayer(nn.Module):
     def forward(self, x, training, noise_epsilon=1e-2):
         # x [B, T, C, H, W, D]
         B, T, C, H, W, D = x.shape
+        assert C == self.in_chans, 'input channels should be equal to in_chans'
 
-        # # embed & fuse
-        # if self.position_wise:
-        #     x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
-        # else:
-        #     x = rearrange(x, 'b t c h w d -> (b t c) d h w')
-        #     for embed_layer in self.embed_layers:
-        #         x = embed_layer(x)
-        #     x = rearrange(x, '(b t c) d h w -> b t (c h w d)', c=C, t=T)
-        # x = self.fuse_proj(x)
-        # x = self.fuse_drop(x)
-        # if self.position_wise:
-        #     x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
-        # else:
-        #     x = rearrange(x, 'b t c h w d -> (b t c) d h w')
-        #     x = self.squeeze_layer(x) # -> [BTC, D]
-        #     x = rearrange(x, '(b t c) d -> b t (c d)', t=T, c=C)
-        # x = self.in_proj(x)
+        # embed & fuse
         if self.position_wise:
             x = rearrange(x, 'b t c h w d -> (b h w) t (c d)')
         else:
-            x = rearrange(x, 'b t c h w d -> b t (h w) (c d)')
-            x = x.mean(-2) 
-        x = self.in_proj(x)
+            x = rearrange(x, 'b t c h w d -> (b t c) d h w')
+            for conv in self.Convs:
+                x = conv(x)
+            x = rearrange(x, '(b t c) d h w -> b t (c h w d)', c=C, t=T)
+        x = self.fuse_proj(x)
+        x = self.fuse_drop(x)
 
         # fft
         x = rearrange(x, 'b t d -> b d t')
         xf = torch.fft.rfft(x, dim=-1, norm='ortho')[:, :, 1:]  # [B, D, T//2]
         amp = torch.abs(xf) # [B, D, T//2]
-
         clean_logits = amp @ self.w_gate # [B, D, Ps]
+
         if training:
             raw_noise_stddev = amp @ self.w_noise # [B, D, Ps]
             noise_stddev = (F.softplus(raw_noise_stddev) + noise_epsilon)
@@ -276,6 +253,7 @@ class FourierLayer(nn.Module):
             logits = clean_logits  # [B, D, Ps]
 
         weights = logits.mean(1)  # [B, Ps]
+
         top_weights, top_indices = torch.topk(weights, self.top_k, dim=-1)  # [B, top_k], [B, top_k]
         top_weights = F.softmax(top_weights, dim=-1)  # [B, top_k]
 
@@ -291,22 +269,28 @@ class PeriodicAttentionLayer(nn.Module):
         assert segment_size*d_model % n_heads == 0, 'd_model should be divisible by n_heads'
         self.seq_len = seq_len
         self.segment_size = segment_size
-        self.d_model = d_model * segment_size
         self.inner_attention = attention
         self.n_heads = n_heads
-        self.head_dim = self.d_model // n_heads
-        self.qkv = nn.Linear(self.d_model, self.d_model * 3, bias=qkv_bias)
+        self.in_dim = d_model * segment_size
+        self.hid_dim = d_model * (segment_size//2)
+        self.out_dim = d_model * segment_size
+        self.head_dim = self.hid_dim // n_heads
+        self.qkv = nn.Linear(self.in_dim, self.hid_dim * 3, bias=qkv_bias)
         self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.proj = nn.Linear(self.d_model, self.d_model, bias=proj_bias)
+        self.proj = nn.Linear(self.hid_dim, self.out_dim, bias=proj_bias)
         self.proj_drop = nn.Dropout(proj_drop)
         self.position_wise = position_wise
         self.individual = individual
 
         self.learned_pe = learned_pe
-        num_tokens = seq_len // segment_size if seq_len % segment_size == 0 else seq_len // segment_size + 1
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, self.d_model)) if learned_pe else PositionalEmbedding(self.d_model)
+        num_segments = seq_len // segment_size if seq_len % segment_size == 0 else seq_len // segment_size + 1
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_segments, self.in_dim)) if learned_pe else PositionalEmbedding(self.in_dim)
         self.pos_drop = nn.Dropout(pos_drop)
+
+        # weight initialization
+        if learned_pe:
+            nn.init.trunc_normal_(self.pos_embed, std=.02)
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, T, C, H, W, D] or [BHW, T, C, D]
@@ -315,7 +299,7 @@ class PeriodicAttentionLayer(nn.Module):
 
         if self.position_wise:
             B, T, C, D = x.shape
-            x = rearrange(x, 'b t c d -> (b c) t d')
+            x = rearrange(x, 'bhw t c d -> (bhw c) t d')
         else:
             B, T, C, H, W, D = x.shape
             x = rearrange(x, 'b t c h w d -> (b c h w) t d')
@@ -323,8 +307,14 @@ class PeriodicAttentionLayer(nn.Module):
         # segment
         padding_len = T - T % self.segment_size if T % self.segment_size != 0 else 0
         x = F.pad(x, (0, 0, 0, padding_len), mode='replicate')
-        x = x.unfold(1, self.segment_size, self.segment_size).contiguous()
+        x = x.unfold(1, self.segment_size, self.segment_size)
         x = rearrange(x, 'b n d p -> b n (p d)')
+
+        # positional embedding
+        if self.learned_pe:
+            x = self.pos_drop(x + self.pos_embed)
+        else:
+            x = self.pos_drop(x + self.pos_embed(x))
 
         qkv = self.qkv(x)
         qkv = rearrange(qkv, 'b n (qkv h d) -> qkv b h n d', qkv=3, h=self.n_heads)
@@ -346,7 +336,7 @@ class PeriodicAttentionLayer(nn.Module):
 
         x = rearrange(x, 'b n (p d) -> b (n p) d', p=self.segment_size)[:,:T]
         if self.position_wise:
-            x = rearrange(x, '(b c) t d -> b t c d', c=C)
+            x = rearrange(x, '(bhw c) t d -> bhw t c d', c=C)
         else:
             x = rearrange(x, '(b c h w) t d -> b t c h w d', c=C, h=H, w=W)
 
@@ -394,18 +384,19 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
             x = rearrange(x, 'b t c h w d -> (b h w) t c d')
 
         # dispatch
-        x = dispatch(x, gates) # Ps * [B, T, C, H, W, D] or Ps * [BHW, T, C, D]
+        xs = dispatch(x, gates) # Ps * [B, T, C, H, W, D] or Ps * [BHW, T, C, D]
         
         # multi-branch attention
-        xs = []
-        attns = []
-        for i, attention_layer in enumerate(self.attention_layers):
-            xi, attn = attention_layer(x[i], attn_mask=attn_mask, tau=tau, delta=delta)
-            xs.append(xi)
-            attns.append(attn)
+        # attns = []
+        # for i, (x_item, attention_layer) in enumerate(zip(xs, self.attention_layers)):
+        #     x_item, attn = attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)
+        #     xs[i] = x_item
+        #     attns.append(attn)
+        xs = [attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
+        attns = None
 
         # combine
-        x = combine(xs, gates, position_wise=self.position_wise)
+        x = combine(xs, gates)
 
         # re-arrange
         if self.position_wise:
@@ -602,18 +593,22 @@ class MSPSTTEncoderLayer(nn.Module):
         self.attention_t = attention_t
         self.attention_s = attention_s
         activation = nn.ReLU if activation == "relu" else nn.GELU
+        self.mlp_v = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout) if attention_v is not None else None
         self.mlp_t = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
         self.mlp_s = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.norm3 = nn.LayerNorm(d_model)
+        self.norm1 = nn.LayerNorm(d_model) # for variable attention
+        self.norm2 = nn.LayerNorm(d_model) # for variable mlp
+        self.norm3 = nn.LayerNorm(d_model) # for temporal attention
+        self.norm4 = nn.LayerNorm(d_model) # for temporal mlp
+        self.norm5 = nn.LayerNorm(d_model) # for spatial attention
+        self.norm6 = nn.LayerNorm(d_model) # for spatial mlp
         # self.fusion_st = nn.Linear(d_model*2, d_model)
         self.dropout = nn.Dropout(dropout)
         self.pre_norm = pre_norm
         self.is_parallel = is_parallel
 
-        self.fusion_st = Mlp(in_features=d_model*2, hidden_features=d_ff, out_features=d_model, act_layer=activation, drop=dropout)
-        self.norm4 = nn.LayerNorm(d_model)
+        self.fusion_st = Mlp(in_features=d_model*2, hidden_features=d_model*4, out_features=d_model, act_layer=activation, drop=dropout)
+        self.norm7 = nn.LayerNorm(d_model*2) if pre_norm else nn.LayerNorm(d_model) # for fusion
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # x [B, T, C, H, W, D]
@@ -627,97 +622,107 @@ class MSPSTTEncoderLayer(nn.Module):
             x = res + self.dropout(x)
             if not self.pre_norm:
                 x = self.norm1(x)
+
+            # variable mlp
+            res = x
+            if self.pre_norm:
+                x = self.norm2(x)
+            x = self.mlp_v(x)
+            x = res + self.dropout(x)
+            if not self.pre_norm:
+                x = self.norm2(x)
         else:
             attn_v = None
 
         if self.is_parallel:
             ## parallel spatial attention and temporal attention
-            res_t = res_s = res = x
             # temporal attention
+            res_t = x
             if self.pre_norm:
-                x_t = self.norm2(x)
+                x_t = self.norm3(x)
             else:
                 x_t = x
             x_t, attn_t = self.attention_t(x_t, attn_mask=attn_mask, tau=tau, delta=delta)
             x_t = res_t + self.dropout(x_t)
             if not self.pre_norm:
-                x_t = self.norm2(x_t)
+                x_t = self.norm3(x_t)
 
             # temporal mlp
             res_t = x_t
             if self.pre_norm:
-                x_t = self.norm3(x_t)
+                x_t = self.norm4(x_t)
             x_t = self.mlp_t(x_t)
             x_t = res_t + self.dropout(x_t)
             if not self.pre_norm:
-                x_t = self.norm3(x_t)
+                x_t = self.norm4(x_t)
 
             # spatial attention
+            res_s = x
             if self.pre_norm:
-                x_s = self.norm3(x)
+                x_s = self.norm5(x)
             else:
                 x_s = x
             x_s, attn_s = self.attention_s(x_s)
             x_s = res_s + self.dropout(x_s)
             if not self.pre_norm:
-                x_s = self.norm3(x_s)
+                x_s = self.norm5(x_s)
 
             # spatial mlp
             res_s = x_s
             if self.pre_norm:
-                x_s = self.norm3(x_s)
+                x_s = self.norm6(x_s)
             x_s = self.mlp_s(x_s)
             x_s = res_s + self.dropout(x_s)
             if not self.pre_norm:
-                x_s = self.norm3(x_s)
+                x_s = self.norm6(x_s)
 
             # combine
             x = torch.cat([x_t, x_s], dim=-1)
             # x = self.fusion_st(x)
             if self.pre_norm:
-                x = self.norm4(x)
+                x = self.norm7(x)
             x = self.fusion_st(x)
-            x = res + self.dropout(x)
+            x = x + self.dropout(x)
             if not self.pre_norm:
-                x = self.norm4(x)
+                x = self.norm7(x)
 
         else:
             ## serial spatial attention and temporal attention
             res = x
             # temporal attention
             if self.pre_norm:
-                x = self.norm2(x)
+                x = self.norm3(x)
             x, attn_t = self.attention_t(x, attn_mask=attn_mask, tau=tau, delta=delta)
             x = res + self.dropout(x)
             if not self.pre_norm:
-                x = self.norm2(x)
+                x = self.norm3(x)
 
             # temporal mlp
             res = x
             if self.pre_norm:
-                x = self.norm3(x)
+                x = self.norm4(x)
             x = self.mlp_t(x)
             x = res + self.dropout(x)
             if not self.pre_norm:
-                x = self.norm3(x)
+                x = self.norm4(x)
 
             # spatial attention
             res = x
             if self.pre_norm:
-                x = self.norm3(x)
-            x, attn_s = self.attention_s(x, mask=attn_mask)
+                x = self.norm5(x)
+            x, attn_s = self.attention_s(x)
             x = res + self.dropout(x)
             if not self.pre_norm:
-                x = self.norm3(x)
+                x = self.norm5(x)
 
             # spatial mlp
             res = x
             if self.pre_norm:
-                x = self.norm3(x)
+                x = self.norm6(x)
             x = self.mlp_s(x)
             x = res + self.dropout(x)
             if not self.pre_norm:
-                x = self.norm3(x)
+                x = self.norm6(x)
 
         return x, (attn_v, attn_t, attn_s)
     
@@ -747,23 +752,17 @@ class PatchEmbed(nn.Module):
         super(PatchEmbed, self).__init__()
         self.img_size = img_size
         self.patch_size = patch_size
-        self.in_chans = in_chans
         self.embed_dim = embed_dim
         self.individual = individual
-        self.proj = nn.Conv2d(1, embed_dim, kernel_size=patch_size, stride=patch_size) if individual else nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.in_chans = 1 if individual else in_chans
+        self.proj = nn.Conv2d(self.in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        # x [B, T, H, W, C]
+        # x [B, T, H, W, C] -> [B, T, C', H', W', D]
         B, T, H, W, C = x.shape
-        if self.individual:
-            x = rearrange(x, 'b t h w c -> (b t c) () h w')
-        else:
-            x = rearrange(x, 'b t h w c -> (b t) c h w')
+        x = rearrange(x, 'b t h w (c d) -> (b t c) d h w', d=self.in_chans)
         x = self.proj(x)
-        if self.individual:
-            x = rearrange(x, '(b t c) d h w -> b t c h w d', t=T, c=C)
-        else:
-            x = rearrange(x, '(b t) d h w -> b t () h w d', t=T)
+        x = rearrange(x, '(b t c) d h w -> b t c h w d', B=B, T=T)
         return x
 
 
@@ -846,12 +845,15 @@ class Model(nn.Module):
         self.img_size = tuple([configs.height, configs.width])
         self.patch_size = configs.patch_size
         window_size = to_2tuple(window_size)
-        shift_size = tuple([w // 2 for w in window_size])
+        # shift_size = tuple([w // 2 for w in window_size])
         self.individual = configs.individual
         assert self.height % self.patch_size == 0, "Height must be divisible by patch size"
         assert self.width % self.patch_size == 0, "Width must be divisible by patch size"
 
         self.patch_embed = PatchEmbed(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
+        
+        self.temporal_embedding = TemporalEmbedding(d_model=configs.d_model, embed_type=configs.embed_type, freq=configs.freq) if configs.embed_type != 'timeF' else TimeFeatureEmbedding(d_model=configs.d_model, embed_type=configs.embed_type, freq=configs.freq)
+        self.temporal_embedding_dropout = nn.Dropout(configs.dropout)
 
         self.encoder = MSPSTTEncoder(
                     [
@@ -915,9 +917,9 @@ class Model(nn.Module):
                                     qk_norm=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                input_resolution=(configs.height // self.patch_size, configs.width // self.patch_size),
+                                input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
                                 window_size=window_size,
-                                shift_size=0 if (i % 2 == 0) else shift_size,
+                                shift_size=0 if (i % 2 == 0) else window_size//2,
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
@@ -933,36 +935,42 @@ class Model(nn.Module):
                     norm_layer=nn.LayerNorm(configs.d_model)
                 )
 
-        # self.patch_recovery = PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
-        self.patch_recovery = PatchInflated(self.patch_size, configs.enc_in, configs.d_model, stride=2, padding=1, output_padding=1, individual=configs.individual)
+        self.patch_recovery = PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
+        # self.patch_recovery = PatchInflated(self.patch_size, configs.enc_in, configs.d_model, stride=2, padding=1, output_padding=1, individual=configs.individual)
 
-    def forward_core(self, x_enc):
+    def forward_core(self, x_enc, x_mark_enc):
         # x_enc [B, T, H, W, C]
 
         # patch embedding
-        x_embed = self.patch_embed(x_enc) # -> [B, T, C, H, W, D] C=1 if individual=True else enc_in
+        x_enc = self.patch_embed(x_enc) # -> [B, T, C, H, W, D] C=1 if individual=True else enc_in
+
+        # temporal embedding
+        x_enc = self.temporal_embedding_dropout(x_enc + self.temporal_embedding(x_mark_enc).unsqueeze(-2).unsqueeze(-2).unsqueeze(-2))
         
         # encoding
-        enc_out, _ = self.encoder(x_embed) # -> [B, T, C, H, W, D]
+        enc_out, _ = self.encoder(x_enc) # -> [B, T, C, H, W, D]
 
-        # decoding
+        # patch recovery
         dec_out = self.patch_recovery(enc_out) # -> [B, T, H, W, C]
 
         return dec_out
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         if self.seq_len >= self.pred_len:
-            return self.forward_core(x_enc)[:,:self.pred_len], None
+            return self.forward_core(x_enc, x_mark_enc)[:,:self.pred_len], None
         else:
             d = self.pred_len // self.seq_len 
             r = self.pred_len % self.seq_len
+            x_mark = torch.cat([x_mark_enc, x_mark_dec], dim=1)
             ys = []
             x = x_enc
             for i in range(d):
-                x = self.forward_core(x)
+                time_mark = x_mark[:,i*self.seq_len:(i+1)*self.seq_len]
+                x = self.forward_core(x, time_mark)
                 ys.append(x)
             if r > 0:
-                x = self.forward_core(x)
+                time_mark = x_mark[:,d*self.seq_len:]
+                x = self.forward_core(x, x_mark_enc)
                 ys.append(x[:,:r])
             y = torch.cat(ys, dim=1)
             return y, None
