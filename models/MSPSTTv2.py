@@ -8,30 +8,7 @@ from einops import rearrange
 from timm.models.swin_transformer import WindowAttention, window_partition, window_reverse
 from timm.models.vision_transformer import Attention as VariableAttention
 from timm.layers import Mlp, LayerNorm2d, use_fused_attn, to_2tuple
-
-# add layers to the system path ../../layers
-import sys
-import os
-# 获取当前文件的目录
-current_dir = os.path.dirname(os.path.abspath(__file__))
-# 获取上上层目录
-parent_dir = os.path.dirname(current_dir)
-# 将上上层目录添加到 sys.path
-if parent_dir not in sys.path:
-    sys.path.append(parent_dir)
-from layers.Embed import PositionalEmbedding, PositionalEmbedding2D, TemporalEmbedding, TimeFeatureEmbedding
-
-def dispatch(inp, gates):
-    # sort experts
-    _, index_sorted_experts = torch.nonzero(gates).sort(0)
-    # get according batch index for each expert
-    _batch_index = torch.nonzero(gates)[index_sorted_experts[:, 1], 0]
-    _part_sizes = (gates > 0).sum(0).tolist()
-    # assigns samples to experts whose gate is nonzero
-    # expand according to batch index so we can just split by _part_sizes
-    inp_exp = inp[_batch_index].squeeze(1)
-    return torch.split(inp_exp, _part_sizes, dim=0)
-
+from layers.Embed import PositionalEmbedding, TemporalEmbedding, TimeFeatureEmbedding
 
 def dispatch(inp, gates):
     # sort experts
@@ -190,7 +167,8 @@ class FourierLayer(nn.Module):
                     nn.Conv2d(in_channels=d_model, out_channels=d_model, kernel_size=2, stride=2), 
                     # nn.BatchNorm2d(d_model),
                     LayerNorm2d(d_model),
-                    nn.SiLU(inplace=True)
+                    # nn.SiLU(inplace=True)
+                    nn.GELU()
                 )
             )
 
@@ -586,23 +564,24 @@ class WindowAttentionLayer(nn.Module):
 
 class MSPSTTEncoderLayer(nn.Module):
     # r"""Parallel Spatial-Temporal Attention Block with Shared Variable Attention"""
-    def __init__(self, attention_v, attention_t, attention_s, d_model, d_ff=None, dropout=0., activation="relu", pre_norm=False, is_parallel=True):
+    def __init__(self, attention_v, attention_t, attention_s, d_model, n_heads, d_ff=None, dropout=0., activation="relu", pre_norm=False, is_parallel=True):
         super(MSPSTTEncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention_v = attention_v
         self.attention_t = attention_t
         self.attention_s = attention_s
+        assert isinstance(attention_s, nn.ModuleList), 'attention_s should be a nn.ModuleList'
+        attention_s_depth = len(attention_s)
         activation = nn.ReLU if activation == "relu" else nn.GELU
         self.mlp_v = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout) if attention_v is not None else None
         self.mlp_t = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
-        self.mlp_s = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
+        self.mlp_s = nn.ModuleList([Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout) for _ in range(attention_s_depth)])
         self.norm1 = nn.LayerNorm(d_model) # for variable attention
         self.norm2 = nn.LayerNorm(d_model) # for variable mlp
         self.norm3 = nn.LayerNorm(d_model) # for temporal attention
         self.norm4 = nn.LayerNorm(d_model) # for temporal mlp
-        self.norm5 = nn.LayerNorm(d_model) # for spatial attention
-        self.norm6 = nn.LayerNorm(d_model) # for spatial mlp
-        # self.fusion_st = nn.Linear(d_model*2, d_model)
+        self.norm5 = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(attention_s_depth)]) # for spatial attention
+        self.norm6 = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(attention_s_depth)]) # for spatial mlp
         self.dropout = nn.Dropout(dropout)
         self.pre_norm = pre_norm
         self.is_parallel = is_parallel
@@ -657,24 +636,24 @@ class MSPSTTEncoderLayer(nn.Module):
                 x_t = self.norm4(x_t)
 
             # spatial attention
-            res_s = x
-            if self.pre_norm:
-                x_s = self.norm5(x)
-            else:
-                x_s = x
-            x_s, attn_s = self.attention_s(x_s)
-            x_s = res_s + self.dropout(x_s)
-            if not self.pre_norm:
-                x_s = self.norm5(x_s)
+            x_s = x
+            for attention_s, mlp_s, norm_attn, norm_mlp in zip(self.attention_s, self.mlp_s, self.norm5, self.norm6):
+                res_s = x_s
+                if self.pre_norm:
+                    x_s = norm_attn(x_s)
+                x_s, attn_s = attention_s(x_s)
+                x_s = res_s + self.dropout(x_s)
+                if not self.pre_norm:
+                    x_s = norm_attn(x_s)
 
-            # spatial mlp
-            res_s = x_s
-            if self.pre_norm:
-                x_s = self.norm6(x_s)
-            x_s = self.mlp_s(x_s)
-            x_s = res_s + self.dropout(x_s)
-            if not self.pre_norm:
-                x_s = self.norm6(x_s)
+                # spatial mlp
+                res_s = x_s
+                if self.pre_norm:
+                    x_s = norm_mlp(x_s)
+                x_s = mlp_s(x_s)
+                x_s = res_s + self.dropout(x_s)
+                if not self.pre_norm:
+                    x_s = norm_mlp(x_s)
 
             # combine
             x = torch.cat([x_t, x_s], dim=-1)
@@ -707,22 +686,23 @@ class MSPSTTEncoderLayer(nn.Module):
                 x = self.norm4(x)
 
             # spatial attention
-            res = x
-            if self.pre_norm:
-                x = self.norm5(x)
-            x, attn_s = self.attention_s(x)
-            x = res + self.dropout(x)
-            if not self.pre_norm:
-                x = self.norm5(x)
+            for attention_s, mlp_s, norm_attn, norm_mlp in zip(self.attention_s, self.mlp_s, self.norm5, self.norm6):
+                res = x
+                if self.pre_norm:
+                    x = norm_attn(x)
+                x, attn_s = attention_s(x)
+                x = res + self.dropout(x)
+                if not self.pre_norm:
+                    x = norm_attn(x)
 
-            # spatial mlp
-            res = x
-            if self.pre_norm:
-                x = self.norm6(x)
-            x = self.mlp_s(x)
-            x = res + self.dropout(x)
-            if not self.pre_norm:
-                x = self.norm6(x)
+                # spatial mlp
+                res = x
+                if self.pre_norm:
+                    x = norm_mlp(x)
+                x = mlp_s(x)
+                x = res + self.dropout(x)
+                if not self.pre_norm:
+                    x = norm_mlp(x)
 
         return x, (attn_v, attn_t, attn_s)
     
@@ -833,7 +813,7 @@ class Model(nn.Module):
     Multi-Scale Periodic Spatio-Temporal Transformer ------ SimVP Architecture
     
     '''
-    def __init__(self, configs, window_size=4): 
+    def __init__(self, configs, depths=[2, 2, 2, 2], window_size=4): 
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
@@ -904,24 +884,29 @@ class Model(nn.Module):
                                 position_wise=False,
                                 individual=False,
                             ),
-                            WindowAttentionLayer(
-                                MyWindowAttention(
-                                    d_model=configs.d_model,
-                                    n_heads=configs.n_heads,
-                                    window_size=window_size,
-                                    qkv_bias=True,
-                                    attn_drop=configs.dropout,
-                                    proj_drop=configs.dropout,
-                                    qk_norm=False,
-                                    output_attention=configs.output_attention,
-                                ),
-                                input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
-                                window_size=window_size,
-                                shift_size=0 if (i % 2 == 0) else window_size//2,
-                                always_partition=False,
-                                dynamic_mask=False,
+                            nn.ModuleList(
+                                [
+                                    WindowAttentionLayer(
+                                        MyWindowAttention(
+                                            d_model=configs.d_model,
+                                            n_heads=configs.n_heads,
+                                            window_size=window_size,
+                                            qkv_bias=True,
+                                            attn_drop=configs.dropout,
+                                            proj_drop=configs.dropout,
+                                            qk_norm=False,
+                                            output_attention=configs.output_attention,
+                                        ),
+                                        input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                        window_size=window_size,
+                                        shift_size=0 if (j % 2 == 0) else window_size//2,
+                                        always_partition=False,
+                                        dynamic_mask=False,
+                                    ) for j in range(depths[i])
+                                ]
                             ),
                             d_model=configs.d_model,
+                            n_heads=configs.n_heads,
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
