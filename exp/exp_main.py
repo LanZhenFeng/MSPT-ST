@@ -367,13 +367,19 @@ class Exp_Main(Exp_Basic):
     def get_paramandflops(self):
         from thop import profile
         from thop import clever_format
-        input = torch.randn(1, 30, 96, 64, 14)
-        input_mark = torch.randn(1, 30, 3)
-        dec_inp = torch.randn(1, 30, 96, 64, 14)
-        dec_inp_mark = torch.randn(1, 30, 3)
-        flops, params = profile(self.model,
-                                inputs=(input, input_mark, dec_inp,
-                                        dec_inp_mark))
+        input = torch.randn(1, 30, 96, 64, 14).to(self.device)
+        input_mark = torch.randn(1, 30, 3).to(self.device)
+        dec_inp = torch.randn(1, 60, 96, 64, 14).to(self.device)
+        dec_inp_mark = torch.randn(1, 30, 3).to(self.device)
+        # trues = torch.randn(1, 30, 96, 64, 14).to(self.device)
+        # extra_input = {'batch_y': trues}
+
+        # mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
+        # if mask_true is not None:
+        #     mask_true = mask_true.float().to(self.device)
+        #     extra_input['mask_true'] = mask_true
+
+        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark))
 
         flops_1 = f"{flops / 10**9:.3f}G"
         params_1 = f"{params / 10**6:.3f}M"
