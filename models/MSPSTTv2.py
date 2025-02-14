@@ -762,7 +762,7 @@ class PatchEmbed(nn.Module):
         B, T, H, W, C = x.shape
         x = rearrange(x, 'b t h w (c d) -> (b t c) d h w', d=self.in_chans)
         x = self.proj(x)
-        x = rearrange(x, '(b t c) d h w -> b t c h w d', B=B, T=T)
+        x = rearrange(x, '(b t c) d h w -> b t c h w d', b=B, t=T)
         return x
 
 
