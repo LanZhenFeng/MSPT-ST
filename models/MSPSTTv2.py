@@ -852,7 +852,7 @@ class Model(nn.Module):
 
         self.patch_embed = PatchEmbed(self.img_size, self.patch_size, configs.enc_in, configs.d_model, configs.individual)
         
-        self.temporal_embedding = TemporalEmbedding(d_model=configs.d_model, embed_type=configs.embed_type, freq=configs.freq) if configs.embed_type != 'timeF' else TimeFeatureEmbedding(d_model=configs.d_model, embed_type=configs.embed_type, freq=configs.freq)
+        self.temporal_embedding = TemporalEmbedding(d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq) if configs.embed_type != 'timeF' else TimeFeatureEmbedding(d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq)
         self.temporal_embedding_dropout = nn.Dropout(configs.dropout)
 
         self.encoder = MSPSTTEncoder(
