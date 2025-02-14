@@ -591,13 +591,14 @@ class MSPSTTEncoderLayer(nn.Module):
         # x [B, C, T, H, W, D]
         # B, C, T, H, W, D = x.shape
         # variable attention
-        res = x
-        if self.pre_norm:
-            x = self.norm1(x)
-        x, attn_v = self.attention_v(x, attn_mask=attn_mask, tau=tau, delta=delta)
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm1(x)
+        if self.attention_v is not None:
+            res = x
+            if self.pre_norm:
+                x = self.norm1(x)
+            x, attn_v = self.attention_v(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x = res + self.dropout(x)
+            if not self.pre_norm:
+                x = self.norm1(x)
 
         if self.is_parallel:
             ## parallel spatial attention and temporal attention
@@ -800,7 +801,7 @@ class Model(nn.Module):
                                 proj_bias=True,
                                 proj_drop=configs.dropout,
                                 pos_drop=configs.dropout,
-                            ),
+                            ) if configs.individual else None,
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(
                                     d_model=configs.d_model,
