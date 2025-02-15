@@ -283,7 +283,7 @@ class PeriodicAttentionLayer(nn.Module):
             x = rearrange(x, 'b t c h w d -> (b c h w) t d')
 
         # segment
-        padding_len = T - T % self.segment_size if T % self.segment_size != 0 else 0
+        padding_len = self.segment_size - T % self.segment_size if T % self.segment_size != 0 else 0
         x = F.pad(x, (0, 0, 0, padding_len), mode='replicate')
         x = x.unfold(1, self.segment_size, self.segment_size)
         x = rearrange(x, 'b n d p -> b n (p d)')
