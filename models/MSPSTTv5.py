@@ -905,7 +905,7 @@ class Model(nn.Module):
         # patch recovery
         dec_out = self.patch_recovery(enc_out) # -> [B, T, H, W, C]
 
-        return dec_out
+        return dec_out.squeeze(1)
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
@@ -922,23 +922,22 @@ class Model(nn.Module):
 
         predictions = []
 
+        init_input = x_ts[:, :self.seq_len]
+
         for t in range(self.seq_len - 1, self.seq_len + self.pred_len - 1):
-            # schedule sampling
-            if t < self.seq_len:
-                x_t = x_ts[:, t - self.seq_len + 1: t + 1]
-            else:
-                # x_t = mask_true[:, t - self.seq_len] * x_ts[:, t] + (1 - mask_true[:, t - self.seq_len]) * x_gen
+            if t >= self.seq_len:
+                
                 next_frame = mask_true[:, t - self.seq_len] * x_ts[:, t] + (1 - mask_true[:, t - self.seq_len]) * x_gen
-                x_t = torch.cat([x_t[:, t - self.seq_len + 1: t], next_frame.unsqueeze(1)], dim=1)
+                init_input = torch.cat([init_input[:, 1:], next_frame.unsqueeze(1)], dim=1)
 
             cur_x_mark = x_mark[:, t - self.seq_len + 1: t + 1]
-            x_gen = self.forward_core(x_t, cur_x_mark)
-
+            x_gen = self.forward_core(init_input, cur_x_mark)
+            
             if t >= self.seq_len - 1:
                 predictions.append(x_gen)
 
         dec_out = torch.stack(predictions, dim=1)
         
-        dec_out = rearrange(dec_out, 'b t c h w -> b t h w c')
+        # dec_out = rearrange(dec_out, 'b t c h w -> b t h w c')
         
         return dec_out, None
