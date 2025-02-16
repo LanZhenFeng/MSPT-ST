@@ -255,8 +255,9 @@ class PeriodicAttentionLayer(nn.Module):
         self.o_proj_drop = nn.Dropout(proj_drop)
 
     def transform_input(self, x):
+        T = x.shape[1]
         x = rearrange(x, 'b t h w d -> (b h w) t d')
-        padding_len = self.segment_size - self.seq_len % self.segment_size if self.seq_len % self.segment_size != 0 else 0
+        padding_len = self.segment_size - T % self.segment_size if T % self.segment_size != 0 else 0
         x = F.pad(x, (0, 0, 0, padding_len), mode='replicate')
         x = x.unfold(1, self.segment_size, self.segment_size)
         x = rearrange(x, 'b n d p -> b n (p d)')
@@ -312,16 +313,13 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
             self.attention_layers.append(
                 PeriodicAttentionLayer(
                     attention,
-                    seq_len,
                     segment_size,
                     d_model,
                     n_heads,
-                    learned_pe=learned_pe,
                     qkv_bias=qkv_bias,
                     qk_norm=qk_norm,
                     proj_bias=proj_bias,
                     proj_drop=proj_drop,
-                    pos_drop=pos_drop,
                 )
             )
 
@@ -965,11 +963,11 @@ class PositionalEmbedding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
 
-        pe = pe.unsqueeze(0)
+        pe = pe.unsqueeze(0).unsqueeze(-2).unsqueeze(-2)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        return self.pe[:, :x.size(1), :, :, :]
+        return self.pe[:, :x.size(1)]
 
 
 class PositionalEmbedding2D(torch.nn.Module):
@@ -1005,7 +1003,7 @@ class PositionalEmbedding2D(torch.nn.Module):
         pe_2d[:, :, d_model + 1::2] = torch.cos(
             pos_h * div_term).unsqueeze(1).repeat(1, width, 1)
 
-        pe_2d = pe_2d.unsqueeze(0)
+        pe_2d = pe_2d.unsqueeze(0).unsqueeze(0)
         self.register_buffer('pe_2d', pe_2d)
 
     def forward(self, x):
