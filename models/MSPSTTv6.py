@@ -304,7 +304,7 @@ class FourierLayer(nn.Module):
         x = x.squeeze(-1)  # [B, T]
 
         # fft
-        xf = torch.fft.rfft(x, dim=-1, norm='ortho')[:, :, 1:]  # [B, T//2]
+        xf = torch.fft.rfft(x, dim=-1, norm='ortho')[:, 1:]  # [B, T//2]
         amp = torch.abs(xf) # [B, T//2]
         clean_logits = amp @ self.w_gate # [B, Ps]
 
@@ -367,8 +367,8 @@ class PeriodicAttentionLayer(nn.Module):
 
     def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
-        # if x.shape[0] == 0:
-        #     return x, None
+        if queries.shape[0] == 0:
+            return queries, None
 
         B, T, H, W, D = queries.shape
         # rearrange and segment
@@ -836,7 +836,7 @@ class MSPSTTDecoderLayer(nn.Module):
         self.pre_norm = pre_norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
 
-    def forward_parallel(self, x, cross, attn_mask=None, tau=None, delta=None):
+    def forward_parallel(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x_t = self.norm_sa_t(x)
@@ -892,7 +892,7 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
-    def forward_serial(self, x, cross, attn_mask=None, tau=None, delta=None):
+    def forward_serial(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x = self.norm_sa_t(x)
@@ -936,15 +936,15 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
         # parallel
         if self.parallelize:
-            return self.forward_parallel(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_parallel(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
         # serial
         else:
-            return self.forward_serial(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_serial(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
 
 class MSPSTTDecoder(nn.Module):
@@ -980,7 +980,7 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
-        self.proj = nn.Conv2d(embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         # x [B, T, H, W, C] -> [B, T, H', W', D]
@@ -1259,7 +1259,7 @@ class Model(nn.Module):
                     projection=PatchRecovery(self.img_size, self.patch_size, configs.c_out, configs.d_model)
                 )
 
-    def forward_core(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [B, T, H, W, C]
 
         # embedding
@@ -1267,9 +1267,9 @@ class Model(nn.Module):
         dec_out = self.dec_embedding(x_dec, x_mark_dec) # -> [B, S, H', W', D]
         
         # encoding
-        enc_out, _ = self.encoder(x_enc) # -> [B, T, H', W', D]
+        enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
 
         # decoding
-        dec_out, _ = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
+        dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
 
         return dec_out, None

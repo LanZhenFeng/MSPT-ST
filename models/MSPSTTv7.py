@@ -8,7 +8,7 @@ from einops import rearrange
 from timm.models.swin_transformer import WindowAttention, window_partition, window_reverse
 from timm.models.vision_transformer import Attention as VariableAttention
 from timm.layers import Mlp, LayerNorm2d, use_fused_attn, to_2tuple
-from layers.Embed import PositionalEmbedding, TemporalEmbedding, TimeFeatureEmbedding
+from layers.Embed import TemporalEmbedding, TimeFeatureEmbedding
 
 def dispatch(inp, gates):
     # sort experts
@@ -102,9 +102,9 @@ class FullAttention(nn.Module):
                 return attn_weight @ values, None
 
 
-class TemporalCrossAttentionLayer(nn.Module):
-    def __init__(self, attention, seq_len, pred_len, d_model, n_heads, learned_pe=False, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., pos_drop=0.):
-        super(TemporalCrossAttentionLayer, self).__init__()
+class TemporalAttentionLayer(nn.Module):
+    def __init__(self, attention, d_model, n_heads, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0.):
+        super(TemporalAttentionLayer, self).__init__()
         self.inner_attention = attention
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
@@ -116,44 +116,20 @@ class TemporalCrossAttentionLayer(nn.Module):
         self.o_proj = nn.Linear(d_model, d_model, bias=proj_bias)
         self.o_proj_drop = nn.Dropout(proj_drop)
 
-        self.learned_pe = learned_pe
-        self.pos_embed_x = nn.Parameter(torch.zeros(1, seq_len, d_model)) if learned_pe else PositionalEmbedding(d_model)
-        self.pos_embed_cross = nn.Parameter(torch.zeros(1, pred_len, d_model)) if learned_pe else PositionalEmbedding(d_model)
-        self.pos_drop = nn.Dropout(pos_drop)
-
-        # weight initialization
-        if learned_pe:
-            nn.init.trunc_normal_(self.pos_embed_x, std=.02)
-            nn.init.trunc_normal_(self.pos_embed_cross, std=.02)
-
     def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
-        # if x.shape[0] == 0:
-        #     return x, None
 
         B, T, H, W, D = queries.shape
-        # rearrange and segment
-        queries = rearrange(queries, 'b t h w d -> (b h w) t d')
-        keys = rearrange(keys, 'b t h w d -> (b h w) t d')
-        values = rearrange(values, 'b t h w d -> (b h w) t d')
-
-        # positional embedding
-        if self.learned_pe:
-            queries = self.pos_drop(queries + self.pos_embed_x)
-            keys = self.pos_drop(keys + self.pos_embed_cross)
-            values = self.pos_drop(values + self.pos_embed_cross)
-        else:
-            queries = self.pos_drop(queries + self.pos_embed_x(queries))
-            keys = self.pos_drop(keys + self.pos_embed_cross(keys))
-            values = self.pos_drop(values + self.pos_embed_cross(values))
 
         # qkv projection
         queries = self.q_proj(queries)
         keys = self.k_proj(keys)
         values = self.v_proj(values)
-        queries = rearrange(queries, 'b n (h d) -> b h n d', h=self.n_heads)
-        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.n_heads)
-        values = rearrange(values, 'b n (h d) -> b h n d', h=self.n_heads)
+
+        # rearrange and segment
+        queries = rearrange(queries, 'b t h w (n d) -> (b h w) n t d', n=self.n_heads)
+        keys = rearrange(keys, 'b t h w (n d) -> (b h w) n t d', n=self.n_heads)
+        values = rearrange(values, 'b t h w (n d) -> (b h w) n t d', n=self.n_heads)
         queries, keys = self.q_norm(queries), self.k_norm(keys)
 
         x, attn = self.inner_attention(
@@ -165,76 +141,7 @@ class TemporalCrossAttentionLayer(nn.Module):
             delta=delta
         )
 
-        x = rearrange(x, 'b h n d -> b n (h d)')
-        x = self.o_proj(x)
-        x = self.o_proj_drop(x)
-        x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
-
-        return x, attn
-
-
-class TemporalSelfAttentionLayer(nn.Module):
-    def __init__(self, attention, seq_len, d_model, n_heads, learned_pe=False, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., pos_drop=0.):
-        super(TemporalSelfAttentionLayer, self).__init__()
-        self.inner_attention = attention
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.q_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
-        self.k_proj= nn.Linear(d_model, d_model, bias=qkv_bias)
-        self.v_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
-        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.o_proj = nn.Linear(d_model, d_model, bias=proj_bias)
-        self.o_proj_drop = nn.Dropout(proj_drop)
-
-        self.learned_pe = learned_pe
-        self.pos_embed = nn.Parameter(torch.zeros(1, seq_len, d_model)) if learned_pe else PositionalEmbedding(d_model)
-        self.pos_drop = nn.Dropout(pos_drop)
-
-        # weight initialization
-        if learned_pe:
-            nn.init.trunc_normal_(self.pos_embed, std=.02)
-
-    def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
-        # x [B, T, H, W, D]
-        # if x.shape[0] == 0:
-        #     return x, None
-
-        B, T, H, W, D = queries.shape
-        # rearrange and segment
-        queries = rearrange(queries, 'b t h w d -> (b h w) t d')
-        keys = rearrange(keys, 'b t h w d -> (b h w) t d')
-        values = rearrange(values, 'b t h w d -> (b h w) t d')
-
-        # positional embedding
-        if self.learned_pe:
-            queries = self.pos_drop(queries + self.pos_embed)
-            keys = self.pos_drop(keys + self.pos_embed)
-            values = self.pos_drop(values + self.pos_embed)
-        else:
-            queries = self.pos_drop(queries + self.pos_embed(queries))
-            keys = self.pos_drop(keys + self.pos_embed(keys))
-            values = self.pos_drop(values + self.pos_embed(values))
-
-        # qkv projection
-        queries = self.q_proj(queries)
-        keys = self.k_proj(keys)
-        values = self.v_proj(values)
-        queries = rearrange(queries, 'b n (h d) -> b h n d', h=self.n_heads)
-        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.n_heads)
-        values = rearrange(values, 'b n (h d) -> b h n d', h=self.n_heads)
-        queries, keys = self.q_norm(queries), self.k_norm(keys)
-
-        x, attn = self.inner_attention(
-            queries,
-            keys,
-            values,
-            attn_mask,
-            tau=tau,
-            delta=delta
-        )
-
-        x = rearrange(x, 'b h n d -> b n (h d)')
+        x = rearrange(x, 'b n t d -> b t (n d)')
         x = self.o_proj(x)
         x = self.o_proj_drop(x)
         x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
@@ -304,7 +211,7 @@ class FourierLayer(nn.Module):
         x = x.squeeze(-1)  # [B, T]
 
         # fft
-        xf = torch.fft.rfft(x, dim=-1, norm='ortho')[:, :, 1:]  # [B, T//2]
+        xf = torch.fft.rfft(x, dim=-1, norm='ortho')[:, 1:]  # [B, T//2]
         amp = torch.abs(xf) # [B, T//2]
         clean_logits = amp @ self.w_gate # [B, Ps]
 
@@ -329,10 +236,9 @@ class FourierLayer(nn.Module):
 
 
 class PeriodicAttentionLayer(nn.Module):
-    def __init__(self, attention, seq_len, segment_size, d_model, n_heads, learned_pe=False, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., pos_drop=0.):
+    def __init__(self, attention, segment_size, d_model, n_heads, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0.):
         super(PeriodicAttentionLayer, self).__init__()
         assert segment_size*d_model % n_heads == 0, 'd_model should be divisible by n_heads'
-        self.seq_len = seq_len
         self.segment_size = segment_size
         self.inner_attention = attention
         self.n_heads = n_heads
@@ -348,15 +254,6 @@ class PeriodicAttentionLayer(nn.Module):
         self.o_proj = nn.Linear(self.hid_dim, self.out_dim, bias=proj_bias)
         self.o_proj_drop = nn.Dropout(proj_drop)
 
-        self.learned_pe = learned_pe
-        num_segments = seq_len // segment_size if seq_len % segment_size == 0 else seq_len // segment_size + 1
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_segments, self.in_dim)) if learned_pe else PositionalEmbedding(self.in_dim)
-        self.pos_drop = nn.Dropout(pos_drop)
-
-        # weight initialization
-        if learned_pe:
-            nn.init.trunc_normal_(self.pos_embed, std=.02)
-
     def transform_input(self, x):
         x = rearrange(x, 'b t h w d -> (b h w) t d')
         padding_len = self.segment_size - self.seq_len % self.segment_size if self.seq_len % self.segment_size != 0 else 0
@@ -367,24 +264,14 @@ class PeriodicAttentionLayer(nn.Module):
 
     def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
-        # if x.shape[0] == 0:
-        #     return x, None
+        if queries.shape[0] == 0:
+            return queries, None
 
         B, T, H, W, D = queries.shape
         # rearrange and segment
         queries = self.transform_input(queries)
         keys = self.transform_input(keys)
         values = self.transform_input(values)
-
-        # positional embedding
-        if self.learned_pe:
-            queries = self.pos_drop(queries + self.pos_embed)
-            keys = self.pos_drop(keys + self.pos_embed)
-            values = self.pos_drop(values + self.pos_embed)
-        else:
-            queries = self.pos_drop(queries + self.pos_embed(queries))
-            keys = self.pos_drop(keys + self.pos_embed(keys))
-            values = self.pos_drop(values + self.pos_embed(values))
 
         # qkv projection
         queries = self.q_proj(queries)
@@ -407,7 +294,7 @@ class PeriodicAttentionLayer(nn.Module):
         x = rearrange(x, 'b h n d -> b n (h d)')
         x = self.o_proj(x)
         x = self.o_proj_drop(x)
-        x = rearrange(x, 'b n (p d) -> b (n p) d', p=self.segment_size)[:,:self.seq_len]
+        x = rearrange(x, 'b n (p d) -> b (n p) d', p=self.segment_size)[:,:T]
         x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
 
         return x, attn
@@ -836,7 +723,7 @@ class MSPSTTDecoderLayer(nn.Module):
         self.pre_norm = pre_norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
 
-    def forward_parallel(self, x, cross, attn_mask=None, tau=None, delta=None):
+    def forward_parallel(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x_t = self.norm_sa_t(x)
@@ -892,7 +779,7 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
-    def forward_serial(self, x, cross, attn_mask=None, tau=None, delta=None):
+    def forward_serial(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x = self.norm_sa_t(x)
@@ -936,15 +823,15 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
         # parallel
         if self.parallelize:
-            return self.forward_parallel(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_parallel(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
         # serial
         else:
-            return self.forward_serial(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_serial(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
 
 class MSPSTTDecoder(nn.Module):
@@ -980,7 +867,7 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
-        self.proj = nn.Conv2d(embed_dim, kernel_size=patch_size, stride=patch_size)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         # x [B, T, H, W, C] -> [B, T, H', W', D]
@@ -1063,6 +950,68 @@ class PatchExpanding(nn.Module):
         return x
 
 
+class PositionalEmbedding(nn.Module):
+
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model).float()
+        pe.requires_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, d_model, 2).float() *
+                    -(log(10000.0) / d_model)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return self.pe[:, :x.size(1), :, :, :]
+
+
+class PositionalEmbedding2D(torch.nn.Module):
+
+    def __init__(self, d_model, height, width):
+        super(PositionalEmbedding2D, self).__init__()
+        self.d_model = d_model
+
+        if d_model % 4 != 0:
+            raise ValueError("Cannot use sin/cos positional encoding with "
+                             "odd dimension (got dim={:d})".format(d_model))
+
+        pe_2d = torch.zeros(height, width, d_model)
+        pe_2d.require_grad = False
+        # Each dimension use half of d_model
+        d_model = int(d_model / 2)
+        div_term = torch.exp(
+            torch.arange(0., d_model, 2) *
+            -(log(10000.0) / d_model))  # [d_model/2]
+
+        pos_w = torch.arange(0., width).unsqueeze(1)  # [W, 1]
+        pos_h = torch.arange(0., height).unsqueeze(1)  # [H, 1]
+
+        pe_2d[:, :,
+              0:d_model:2] = torch.sin(pos_w * div_term).unsqueeze(0).repeat(
+                  height, 1, 1)
+        pe_2d[:, :,
+              1:d_model:2] = torch.cos(pos_w * div_term).unsqueeze(0).repeat(
+                  height, 1, 1)
+        pe_2d[:, :,
+              d_model::2] = torch.sin(pos_h * div_term).unsqueeze(1).repeat(
+                  1, width, 1)
+        pe_2d[:, :, d_model + 1::2] = torch.cos(
+            pos_h * div_term).unsqueeze(1).repeat(1, width, 1)
+
+        pe_2d = pe_2d.unsqueeze(0)
+        self.register_buffer('pe_2d', pe_2d)
+
+    def forward(self, x):
+        return self.pe_2d[:, :, :x.size(2), :x.size(3), :]
+
+
 class DataEmbedding(nn.Module):
     def __init__(self,
                  img_size: tuple,
@@ -1076,6 +1025,8 @@ class DataEmbedding(nn.Module):
 
         self.value_embedding = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=d_model)
         # self.position_embedding = PositionalEmbedding(d_model=d_model)
+        self.temporal_position_embedding = PositionalEmbedding(d_model=d_model)
+        self.spatial_position_embedding = PositionalEmbedding2D(d_model=d_model, height=img_size[0]//patch_size, width=img_size[1]//patch_size)
         self.temporal_embedding = TemporalEmbedding(
             d_model=d_model, embed_type=embed_type,
             freq=freq) if embed_type != 'timeF' else TimeFeatureEmbedding(
@@ -1083,12 +1034,13 @@ class DataEmbedding(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, x_mark):
+        time_pos_embed = self.temporal_position_embedding(x)
+        space_pos_embed = self.spatial_position_embedding(x)
         if x_mark is None:
-            x = self.value_embedding(x) # B T H W D
+            x = self.value_embedding(x) + time_pos_embed + space_pos_embed
         else:
-            x = self.value_embedding(x) + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
+            x = self.value_embedding(x) + time_pos_embed + space_pos_embed + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
         return self.dropout(x)
-
 
 
 class Model(nn.Module):
@@ -1175,7 +1127,7 @@ class Model(nn.Module):
         self.decoder = MSPSTTDecoder(
                     [
                         MSPSTTDecoderLayer(
-                            TemporalSelfAttentionLayer(
+                            TemporalAttentionLayer(
                                 FullAttention(
                                     d_model=configs.d_model,
                                     n_heads=configs.n_heads,
@@ -1183,15 +1135,12 @@ class Model(nn.Module):
                                     is_causal=True,
                                     output_attention=configs.output_attention,
                                 ),
-                                seq_len=configs.seq_len,
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
-                                learned_pe=False,
                                 qkv_bias=True,
                                 qk_norm=False,
                                 proj_bias=True,
                                 proj_drop=configs.dropout,
-                                pos_drop=configs.dropout,
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
@@ -1210,7 +1159,7 @@ class Model(nn.Module):
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            TemporalCrossAttentionLayer(
+                            TemporalAttentionLayer(
                                 FullAttention(
                                     d_model=configs.d_model,
                                     n_heads=configs.n_heads,
@@ -1218,16 +1167,12 @@ class Model(nn.Module):
                                     is_causal=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                seq_len=configs.seq_len,
-                                pred_len=configs.pred_len,
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
-                                learned_pe=False,
                                 qkv_bias=True,
                                 qk_norm=False,
                                 proj_bias=True,
                                 proj_drop=configs.dropout,
-                                pos_drop=configs.dropout,
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
@@ -1259,7 +1204,7 @@ class Model(nn.Module):
                     projection=PatchRecovery(self.img_size, self.patch_size, configs.c_out, configs.d_model)
                 )
 
-    def forward_core(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
         # x_enc [B, T, H, W, C]
 
         # embedding
@@ -1267,9 +1212,9 @@ class Model(nn.Module):
         dec_out = self.dec_embedding(x_dec, x_mark_dec) # -> [B, S, H', W', D]
         
         # encoding
-        enc_out, _ = self.encoder(x_enc) # -> [B, T, H', W', D]
+        enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
 
         # decoding
-        dec_out, _ = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
+        dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
 
         return dec_out, None
