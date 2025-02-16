@@ -180,7 +180,7 @@ class CurriculumLearning:
         self.scheduled_sampling = configs.scheduled_sampling
 
         # special setting for curriculum learning of SwinLSTM
-        if configs.model in ['SwinLSTM_B', 'SwinLSTM_D']:
+        if configs.model in ['SwinLSTM_B', 'SwinLSTM_D'] or configs.model.startswith('MSPSTT'):
             self.patch_size = 1
         else:
             self.patch_size = configs.patch_size
