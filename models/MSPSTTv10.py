@@ -8,7 +8,7 @@ from einops import rearrange
 from timm.models.swin_transformer import WindowAttention, window_partition, window_reverse
 from timm.models.vision_transformer import Attention as VariableAttention
 from timm.layers import Mlp, LayerNorm2d, use_fused_attn, to_2tuple
-from layers.Embed import TemporalEmbedding, TimeFeatureEmbedding
+from layers.Embed import PositionalEmbedding, TemporalEmbedding, TimeFeatureEmbedding
 
 def dispatch(inp, gates):
     # sort experts
@@ -16,10 +16,6 @@ def dispatch(inp, gates):
     # get according batch index for each expert
     _batch_index = torch.nonzero(gates)[index_sorted_experts[:, 1], 0]
     _part_sizes = (gates > 0).sum(0).tolist()
-    # check if _part_sizes is all zeros
-    # when all parts are zero, gates are zeros and nans
-    # if sum(_part_sizes) == 0:
-    #     print(f"All zero parts, gates: {gates}")
     # assigns samples to experts whose gate is nonzero
     # expand according to batch index so we can just split by _part_sizes
     inp_exp = inp[_batch_index].squeeze(1)
@@ -303,7 +299,7 @@ class PeriodicAttentionLayer(nn.Module):
 
 
 class MultiScalePeriodicAttentionLayer(nn.Module):
-    def __init__(self, attention, gate_layer, seq_len, d_model, n_heads, learned_pe=False, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., pos_drop=0.):
+    def __init__(self, attention, gate_layer, d_model, n_heads, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0.):
         super(MultiScalePeriodicAttentionLayer, self).__init__()
         assert d_model % n_heads == 0, 'd_model should be divisible by n_heads'
         self.gate_layer = gate_layer
@@ -326,7 +322,7 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         # queries, keys, values [B, T, H, W, D]
-        B, T, H, W, D = x.shape
+        # B, T, H, W, D = x.shape
 
         # gating
         gates = self.gate_layer(x, training=self.training) # [B, Ps]
@@ -562,6 +558,8 @@ class MSPSTTEncoderLayer(nn.Module):
         self.norm_attn_s = nn.LayerNorm(d_model)
         self.norm_mlp_s = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+
+        self.concat = nn.Linear(2*d_model, d_model) if parallelize else nn.Identity()
         
         self.pre_norm = pre_norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
@@ -605,11 +603,11 @@ class MSPSTTEncoderLayer(nn.Module):
 
         ## combine
         # add
-        x = (x_t + x_s) / 2
+        # x = (x_t + x_s) / 2
         # multiply
         # x = x_t * x_s
         # linear
-        # x = self.linear(torch.cat([x_t, x_s], dim=-1))
+        x = self.concat(torch.cat([x_t, x_s], dim=-1))
 
         return x, (attn_t, attn_s)
 
@@ -646,6 +644,8 @@ class MSPSTTEncoderLayer(nn.Module):
         if not self.pre_norm:
             x = self.norm_mlp_s(x)
 
+        x = self.concat(x)
+
         return x, (attn_t, attn_s)
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
@@ -667,57 +667,61 @@ class MSPSTTEncoder(nn.Module):
     """
     def __init__(self, 
                  encoder_layers,
+                 downsample_layers,
                  norm_layer=None):
         super(MSPSTTEncoder, self).__init__()
         self.encoder_layers = nn.ModuleList(encoder_layers)
+        self.downsample_layers = nn.ModuleList(downsample_layers)
         self.norm = norm_layer
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
-        attns = []
-        for encoder_layer in self.encoder_layers:
+        # attns = []
+        xs = []
+        for encoder_layer, downsample_layer in zip(self.encoder_layers, self.downsample_layers):
             x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
-            attns.append(attn)
+            xs.append(x)
+            x = downsample_layer(x)
+            # attns.append(attn)
 
         if self.norm is not None:
             x = self.norm(x)
 
-        return x, attns
+        return x, xs
 
 
 class MSPSTTDecoderLayer(nn.Module):
     r"""
-    
+
     Decoder layer for Multi-Scale Periodic Spatial-Temporal Transformer.
     Through swapping the order of the spatial attention (attention_s) and the temporal attention (attention_t), we can get two different versions of the decoder layer.
-    
+
     """
-    def __init__(self, 
-                self_attention_t,
-                self_attention_s,
-                cross_attention_t,
-                cross_attention_s,
-                d_model: int,
-                d_ff: int = None,
-                dropout: float = 0.,
-                activation: str = "relu",
-                pre_norm: bool = False,
-                parallelize: bool = False):
-        super(MSPSTTDecoderLayer, self).__init__()
+    def __init__(self,
+                 attention_t,
+                 attention_s,
+                 d_model: int,
+                 d_ff: int = None,
+                 dropout: float = 0.,
+                 activation: str = "relu",
+                 pre_norm: bool = False,
+                 parallelize: bool = False):
+        super(MSPSTTEncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         activation = nn.ReLU if activation == "relu" else nn.GELU
         
-        self.self_attention_t = self_attention_t
-        self.self_attention_s = self_attention_s
-        self.cross_attention_t = cross_attention_t
-        self.cross_attention_s = cross_attention_s
-        self.mlp = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
-        self.norm_sa_t = nn.LayerNorm(d_model)
-        self.norm_sa_s = nn.LayerNorm(d_model)
-        self.norm_ca_t = nn.LayerNorm(d_model)
-        self.norm_ca_s = nn.LayerNorm(d_model)
-        self.norm_cross = nn.LayerNorm(d_model)
-        self.norm_mlp = nn.LayerNorm(d_model)
+        self.attention_t = attention_t
+        self.attention_s = attention_s
+        self.mlp_t = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
+        self.mlp_s = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
+        self.norm_attn_t = nn.LayerNorm(d_model)
+        self.norm_mlp_t = nn.LayerNorm(d_model)
+        self.norm_attn_s = nn.LayerNorm(d_model)
+        self.norm_mlp_s = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+
+        self.cross_norm = nn.LayerNorm(d_model)
+
+        self.concat = nn.Linear(2*d_model, d_model) if parallelize else nn.Identity()
         
         self.pre_norm = pre_norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
@@ -725,102 +729,88 @@ class MSPSTTDecoderLayer(nn.Module):
     def forward_parallel(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
-            x_t = self.norm_sa_t(x)
+            x_t = self.norm_attn_t(x)
+            cross = self.cross_norm(cross)
         else:
             x_t = x
-        x_t, self_attn_t = self.self_attention_t(x_t, x_t, x_t) # Temporal Self-Attention
+        x_t, attn_t = self.attention_t(x_t, cross, cross)
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
-            x_t = self.norm_sa_t(x_t)
+            x_t = self.norm_attn_t(x_t)
+
+        res = x_t
+        if self.pre_norm:
+            x_t = self.norm_mlp_t(x_t)
+        x_t = self.mlp_t(x_t)
+        x_t = res + self.dropout(x_t)
+        if not self.pre_norm:
+            x_t = self.norm_mlp_t(x_t)
 
         res = x
         if self.pre_norm:
-            x_s = self.norm_sa_s(x)
+            x_s = self.norm_attn_s(x)
         else:
             x_s = x
-        x_s, self_attn_s = self.self_attention_s(x_s)
+        x_s, attn_s = self.attention_s(x_s)
         x_s = res + self.dropout(x_s)
         if not self.pre_norm:
-            x_s = self.norm_sa_s(x_s)
+            x_s = self.norm_attn_s(x_s)
         
+        res = x_s
+        if self.pre_norm:
+            x_s = self.norm_mlp_s(x_s)
+        x_s = self.mlp_s(x_s)
+        x_s = res + self.dropout(x_s)
+        if not self.pre_norm:
+            x_s = self.norm_mlp_s(x_s)
+
         ## combine
         # add
-        x = (x_t + x_s) / 2
+        # x = (x_t + x_s) / 2
         # multiply
         # x = x_t * x_s
         # linear
-        # x = self.self_reduction(torch.cat([x_t, x_s], dim=-1))
+        x = self.concat(torch.cat([x_t, x_s], dim=-1))
 
-        res = x
-        if self.pre_norm:
-            x = self.norm_ca_t(x)
-            cross = self.norm_cross(cross)
-        x, cross_attn_t = self.cross_attention_t(x, cross, cross) # Temporal Cross-Attention
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm_ca_t(x)
-
-        res = x
-        if self.pre_norm:
-            x_s = self.norm_ca_s(x)
-        x, cross_attn_s = self.cross_attention_s(x)
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm_ca_s(x)
-
-        res = x
-        if self.pre_norm:
-            x = self.norm_mlp(x)
-        x = self.mlp(x)
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm_mlp(x)
-
-        return x
+        return x, (attn_t, attn_s)
 
     def forward_serial(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
-            x = self.norm_sa_t(x)
-        x, self_attn_t = self.self_attention_t(x, x, x) # Temporal Self-Attention
+            x = self.norm_attn_t(x)
+            cross = self.cross_norm(cross)
+        x, attn_t = self.attention_t(x, cross, cross)
         x = res + self.dropout(x)
         if not self.pre_norm:
-            x = self.norm_sa_t(x)
+            x = self.norm_attn_t(x)
 
         res = x
         if self.pre_norm:
-            x = self.norm_sa_s(x)
-        x, self_attn_s = self.self_attention_s(x)
+            x = self.norm_mlp_t(x)
+        x = self.mlp_t(x)
         x = res + self.dropout(x)
         if not self.pre_norm:
-            x = self.norm_sa_s(x)
+            x = self.norm_mlp_t(x)
 
         res = x
         if self.pre_norm:
-            x = self.norm_ca_t(x)
-            cross = self.norm_cross(cross)
-        x, cross_attn_t = self.cross_attention_t(x, cross, cross) # Temporal Cross-Attention
+            x = self.norm_attn_s(x)
+        x, attn_s = self.attention_s(x)
         x = res + self.dropout(x)
         if not self.pre_norm:
-            x = self.norm_ca_t(x)
+            x = self.norm_attn_s(x)
 
         res = x
         if self.pre_norm:
-            x = self.norm_ca_s(x)
-        x, cross_attn_s = self.cross_attention_s(x)
+            x = self.norm_mlp_s(x)
+        x = self.mlp_s(x)
         x = res + self.dropout(x)
         if not self.pre_norm:
-            x = self.norm_ca_s(x)
+            x = self.norm_mlp_s(x)
+        
+        x = self.concat(x)
 
-        res = x
-        if self.pre_norm:
-            x = self.norm_mlp(x)
-        x = self.mlp(x)
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm_mlp(x)
-
-        return x
+        return x, (attn_t, attn_s)
 
     def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
@@ -841,22 +831,26 @@ class MSPSTTDecoder(nn.Module):
     """
     def __init__(self, 
                  decoder_layers,
+                 upsample_layers=None,
                  norm_layer=None,
                  projection=None):
         super(MSPSTTDecoder, self).__init__()
         self.decoder_layers = nn.ModuleList(decoder_layers)
+        self.upsample_layers = nn.ModuleList(upsample_layers)
         self.norm = norm_layer
         self.projection = projection
 
     def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
-        for decoder_layer in self.decoder_layers:
-            x = decoder_layer(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+        for i, (decoder_layer, upsample_layer) in enumerate(zip(self.decoder_layers, self.upsample_layers)):
+            x = decoder_layer(x, cross[-i-1], x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+            x = upsample_layer(x)
 
         if self.norm is not None:
             x = self.norm(x)
 
         if self.projection is not None:
             x = self.projection(x)
+
         return x
 
 
@@ -899,25 +893,25 @@ class PatchRecovery(nn.Module):
 class PatchMerging(nn.Module):
     """ Patch Merging Layer.
     """
-    def __init__(self, dim, out_dim=None, norm_layer=nn.LayerNorm):
-        """
-        Args:
-            dim: Number of input channels.
-            out_dim: Number of output channels (or 2 * dim if None)
-            norm_layer: Normalization layer.
-        """
+    def __init__(self, 
+                 dim: int,
+                 out_dim: int = None,
+                 height_scale: int = 2,
+                 width_scale: int = 2,
+                 norm_layer: nn.Module = nn.LayerNorm):
         super().__init__()
         self.dim = dim
         self.out_dim = out_dim or 2 * dim
+        self.height_scale, self.width_scale = height_scale, width_scale
         self.norm = norm_layer(4 * dim)
         self.reduction = nn.Linear(4 * dim, self.out_dim, bias=False)
 
     def forward(self, x):
-        B, H, W, C = x.shape
-        pad_values = (0, 0, 0, W % 2, 0, H % 2)
+        B, T, H, W, C = x.shape
+        pad_values = (0, 0, 0, W % self.width_scale, 0, H % self.height_scale)
         x = F.pad(x, pad_values)
-        _, H, W, _ = x.shape
-        x = x.reshape(B, H // 2, 2, W // 2, 2, C).permute(0, 1, 3, 4, 2, 5).flatten(3)
+        _, _, NH, NW, _ = x.shape
+        x = x.reshape(B, T, NH // self.height_scale, self.height_scale, NW // self.width_scale, self.width_scale, C).permute(0, 1, 2, 4, 5, 3, 6).flatten(4)
         x = self.norm(x)
         x = self.reduction(x)
         return x
@@ -925,26 +919,24 @@ class PatchMerging(nn.Module):
 
 class PatchExpanding(nn.Module):
     r""" Patch Expanding Layer.
-    Args:
-        dim: Number of input channels.
-        out_dim: Number of output channels (or 2 * dim if None)
-        norm_layer: Normalization layer.
-        input_resolution (tuple[int]): Resolution of input feature.
-        dim (int): Number of input channels.
-        norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
-    def __init__(self, dim, dim_scale=2, norm_layer=nn.LayerNorm):
+    def __init__(self, 
+                 dim: int,
+                 dim_scale: int = 2,
+                 height_scale: int = 2,
+                 width_scale: int = 2,
+                 norm_layer: nn.Module = nn.LayerNorm):
         super(PatchExpanding, self).__init__()
         self.dim = dim
-        self.expand = nn.Linear(dim, 2 * dim, bias=False) if dim_scale == 2 else nn.Identity()
+        self.height_scale, self.width_scale = height_scale, width_scale
+        self.expand = nn.Linear(dim, ((height_scale * width_scale) // 2) * dim, bias=False) if dim_scale == 2 else nn.Identity()
         self.norm = norm_layer(dim // dim_scale)
 
     def forward(self, x):
-        B, H, W, C = x.shape
+        B, T, H, W, C = x.shape
         x = self.expand(x)
-        x = x.reshape(B, H, W, 2, 2, C // 4)
-        x = x.permute(0, 1, 3, 2, 4, 5).reshape(B, H * 2, W * 2, C // 4)
-        x = x.view(B, -1, C // 4)
+        x = x.reshape(B, T, H, W, self.height_scale, self.width_scale, C // self.height_scale*self.width_scale)
+        x = x.permute(0, 1, 2, 4, 3, 5, 6).reshape(B, T, H * self.height_scale, W * self.width_scale, C // self.height_scale*self.width_scale)
         x = self.norm(x)
         return x
 
@@ -1023,29 +1015,23 @@ class DataEmbedding(nn.Module):
         super(DataEmbedding, self).__init__()
 
         self.value_embedding = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=d_model)
-        # self.position_embedding = PositionalEmbedding(d_model=d_model)
-        self.temporal_position_embedding = PositionalEmbedding(d_model=d_model)
+        self.temporal_posotion_embedding = PositionalEmbedding(d_model=d_model)
         self.spatial_position_embedding = PositionalEmbedding2D(d_model=d_model, height=img_size[0]//patch_size, width=img_size[1]//patch_size)
-        self.temporal_embedding = TemporalEmbedding(
-            d_model=d_model, embed_type=embed_type,
-            freq=freq) if embed_type != 'timeF' else TimeFeatureEmbedding(
-                d_model=d_model, embed_type=embed_type, freq=freq)
+        self.temporal_embedding = TemporalEmbedding(d_model=d_model, embed_type=embed_type, freq=freq) if embed_type != 'timeF' else TimeFeatureEmbedding(d_model=d_model, embed_type=embed_type, freq=freq)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, x_mark):
-        time_pos_embed = self.temporal_position_embedding(x)
-        space_pos_embed = self.spatial_position_embedding(x)
         if x_mark is None:
-            x = self.value_embedding(x) + time_pos_embed + space_pos_embed
+            x = self.value_embedding(x) + self.temporal_posotion_embedding(x) + self.spatial_position_embedding(x)
         else:
-            x = self.value_embedding(x) + time_pos_embed + space_pos_embed + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
+            x = self.value_embedding(x) + self.temporal_posotion_embedding(x) + self.spatial_position_embedding(x) + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
         return self.dropout(x)
 
 
 class Model(nn.Module):
     r'''
     
-    Multi-Scale Periodic Spatio-Temporal Transformer ------ Encoder-Decoder Architecture
+    Multi-Scale Periodic Spatio-Temporal Transformer ------ AR Architecture
     
     '''
     def __init__(self, configs, window_size=4): 
@@ -1064,14 +1050,25 @@ class Model(nn.Module):
 
         self.enc_embedding = DataEmbedding(img_size=self.img_size, patch_size=configs.patch_size, in_chans=configs.enc_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
 
-        self.dec_embedding = DataEmbedding(img_size=self.img_size, patch_size=configs.patch_size, in_chans=configs.dec_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
+        if configs.patch_size == 2:
+            height_scales = [2, 2, 2, 2, 3]
+            width_scales = [2, 2, 2, 2, 2]
+
+        if configs.patch_size == 4:
+            height_scales = [2, 2, 2, 3]
+            width_scales = [2, 2, 2, 2]
+        
+        if configs.patch_size == 8:
+            height_scales = [2, 2, 3]
+            width_scales = [2, 2, 2]
+        
 
         self.encoder = MSPSTTEncoder(
                     [
                         MSPSTTEncoderLayer(
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=False,
@@ -1080,19 +1077,16 @@ class Model(nn.Module):
                                 FourierLayer(
                                     seq_len=configs.seq_len,
                                     top_k=configs.top_k,
-                                    d_model=configs.d_model,
-                                    img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                    d_model=configs.d_model * 2**i,
+                                    img_size=(configs.height//self.patch_size//2**i, configs.width//self.patch_size//2**i),
                                     fuse_drop=configs.dropout,
                                 ),
-                                seq_len=configs.seq_len,
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**i,
                                 n_heads=configs.n_heads,
-                                learned_pe=False,
                                 qkv_bias=True,
                                 qk_norm=False,
                                 proj_bias=True,
                                 proj_drop=configs.dropout,
-                                pos_drop=configs.dropout,
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
@@ -1105,7 +1099,7 @@ class Model(nn.Module):
                                     qk_norm=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                input_resolution=(configs.height//self.patch_size//2**i, configs.width//self.patch_size//2**i),
                                 window_size=window_size,
                                 shift_size=0 if (i % 2 == 0) else window_size//2,
                                 always_partition=False,
@@ -1117,10 +1111,17 @@ class Model(nn.Module):
                             activation=configs.activation,
                             pre_norm=configs.pre_norm,
                             parallelize=configs.is_parallel,
+                        ) for i in range(configs.e_layers)
+                    ],
+                    [
+                        PatchMerging(
+                            dim=configs.d_model * 2**i, 
+                            height_scale=height_scales[i],
+                            width_scale=width_scales[i],
+                            norm_layer=nn.LayerNorm
                         )
                         for i in range(configs.e_layers)
                     ],
-                    norm_layer=nn.LayerNorm(configs.d_model)
                 )
 
         self.decoder = MSPSTTDecoder(
@@ -1131,38 +1132,6 @@ class Model(nn.Module):
                                     d_model=configs.d_model,
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
-                                    is_causal=True,
-                                    output_attention=configs.output_attention,
-                                ),
-                                d_model=configs.d_model,
-                                n_heads=configs.n_heads,
-                                qkv_bias=True,
-                                qk_norm=False,
-                                proj_bias=True,
-                                proj_drop=configs.dropout,
-                            ),
-                            WindowAttentionLayer(
-                                MyWindowAttention(
-                                    d_model=configs.d_model,
-                                    n_heads=configs.n_heads,
-                                    window_size=window_size,
-                                    qkv_bias=True,
-                                    attn_drop=configs.dropout,
-                                    proj_drop=configs.dropout,
-                                    qk_norm=False,
-                                    output_attention=configs.output_attention,
-                                ),
-                                input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
-                                window_size=window_size,
-                                shift_size=0 if (i % 2 == 0) else window_size//2,
-                                always_partition=False,
-                                dynamic_mask=False,
-                            ),
-                            TemporalAttentionLayer(
-                                FullAttention(
-                                    d_model=configs.d_model,
-                                    n_heads=configs.n_heads,
-                                    attn_drop=configs.dropout,
                                     is_causal=False,
                                     output_attention=configs.output_attention,
                                 ),
@@ -1175,7 +1144,7 @@ class Model(nn.Module):
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                     n_heads=configs.n_heads,
                                     window_size=window_size,
                                     qkv_bias=True,
@@ -1184,36 +1153,83 @@ class Model(nn.Module):
                                     qk_norm=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                input_resolution=(configs.height//self.patch_size//2**(configs.e_layers - i - 1), configs.width//self.patch_size//2**(configs.e_layers - i - 1)),
                                 window_size=window_size,
                                 shift_size=0 if (i % 2 == 0) else window_size//2,
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            d_model=configs.d_model,
+                            d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
                             pre_norm=configs.pre_norm,
                             parallelize=configs.is_parallel,
+                        ) for i in range(configs.e_layers)
+                    ],
+                    [
+                        PatchExpanding(
+                            dim=configs.d_model * 2**(configs.e_layers - i),
+                            height_scale=height_scales[configs.e_layers - i - 1],
+                            width_scale=width_scales[configs.e_layers - i - 1],
+                            norm_layer=nn.LayerNorm
                         )
-                        for i in range(configs.d_layers)
+                        for i in range(configs.e_layers)
                     ],
                     norm_layer=nn.LayerNorm(configs.d_model),
-                    projection=PatchRecovery(self.img_size, self.patch_size, configs.c_out, configs.d_model)
+                    projection=PatchRecovery(self.img_size, self.patch_size, configs.enc_in, configs.d_model)
                 )
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+        self.norm = nn.LayerNorm(configs.d_model * 2**configs.e_layers)
+        self.predictor = nn.Linear(self.seq_len*configs.d_model * 2**configs.e_layers, configs.d_model * 2**configs.e_layers)
+
+    def forward_core(self, x_enc, x_mark_enc):
         # x_enc [B, T, H, W, C]
 
         # embedding
-        enc_out = self.enc_embedding(x_enc, x_mark_enc) # -> [B, T, H', W', D]
-        dec_out = self.dec_embedding(x_dec, x_mark_dec) # -> [B, S, H', W', D]
-        
+        enc_out = self.enc_embedding(x_enc, x_mark_enc)
+
         # encoding
-        enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
+        enc_out, _ = self.encoder(x_enc) # -> [B, T, H, W, D]
+
+        # high-level feature prediction
+        enc_out = rearrange(enc_out, 'b t h w d -> b h w (t d)')
+        dec_inp = self.predictor(self.norm(enc_out)) # -> [B, T, H, W, D]
+        dec_inp = rearrange(dec_inp, 'b h w (t d) -> b t h w d', t=1)
 
         # decoding
-        dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
+        dec_out = self.decoder(dec_inp)
 
-        return dec_out, None
+        return dec_out
+
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+        # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
+        if kwargs.get('mask_true', None) is not None:
+            mask_true = kwargs['mask_true']
+        
+        if kwargs.get('batch_y', None) is not None:
+            batch_y = kwargs['batch_y'].to(x_enc.device)[:, -self.pred_len:]
+
+        x_mark = torch.cat([x_mark_enc, x_mark_dec[:, -self.pred_len:]], dim=1)
+
+        if self.training:
+            predictions = []
+            enc_inp = x_enc
+            for t in range(self.pred_len):
+                pred = self.forward_core(enc_inp, x_mark[t:t+self.seq_len])
+                predictions.append(pred)
+                if t < self.pred_len - 1:
+                    add = mask_true[:, t] * batch_y[:, t] + (1 - mask_true[:, t]) * pred.squeeze(1)
+                    enc_inp = torch.cat([enc_inp[:, 1:], add.unsqueeze(1)], dim=1)
+            
+            predictions = torch.cat(predictions, dim=1)
+            return predictions, None
+        else:
+            predictions = []
+            for t in range(self.pred_len):
+                pred = self.forward_core(x_enc, x_mark[t:t+self.seq_len])
+                predictions.append(pred)
+                x_enc = torch.cat([x_enc[:, 1:], pred], dim=1)
+
+            predictions = torch.cat(predictions, dim=1)
+            return predictions, None

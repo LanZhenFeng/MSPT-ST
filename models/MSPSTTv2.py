@@ -16,6 +16,9 @@ def dispatch(inp, gates):
     # get according batch index for each expert
     _batch_index = torch.nonzero(gates)[index_sorted_experts[:, 1], 0]
     _part_sizes = (gates > 0).sum(0).tolist()
+    # check if _part_sizes is all zeros
+    if sum(_part_sizes) == 0:
+        print(f"All zero parts, gates: {gates}")
     # assigns samples to experts whose gate is nonzero
     # expand according to batch index so we can just split by _part_sizes
     inp_exp = inp[_batch_index].squeeze(1)
@@ -85,6 +88,7 @@ class FullAttention(nn.Module):
 
             queries = queries * self.scale
             attn_weight = queries @ keys.transpose(-2, -1)
+            attn_weight += attn_bias
             attn_weight = attn_weight.softmax(dim=-1)
             attn_weight = self.attn_drop(attn_weight)
             if self.output_attention:
@@ -232,11 +236,13 @@ class FourierLayer(nn.Module):
 
         weights = logits.mean(1)  # [B, Ps]
 
-        top_weights, top_indices = torch.topk(weights, self.top_k, dim=-1)  # [B, top_k], [B, top_k]
-        top_weights = F.softmax(top_weights, dim=-1)  # [B, top_k]
+        top_weights, top_indices = torch.topk(weights, self.top_k+1, dim=-1)  # [B, top_k], [B, top_k]
+        top_k_weights = top_weights[:, :self.top_k]
+        top_k_indices = top_indices[:, :self.top_k]
+        top_k_gates = F.softmax(top_k_weights, dim=-1)  # [B, top_k]
 
-        zeros = torch.zeros_like(weights)  # [B, Ps]
-        gates = zeros.scatter_(-1, top_indices, top_weights)  # [B, Ps]
+        zeros = torch.zeros_like(weights, requires_grad=True)  # [B, Ps]
+        gates = zeros.scatter(-1, top_k_indices, top_k_gates)
 
         return gates  # [B, Ps]
 
@@ -564,7 +570,7 @@ class WindowAttentionLayer(nn.Module):
 
 class MSPSTTEncoderLayer(nn.Module):
     # r"""Parallel Spatial-Temporal Attention Block with Shared Variable Attention"""
-    def __init__(self, attention_v, attention_t, attention_s, d_model, n_heads, d_ff=None, dropout=0., activation="relu", pre_norm=False, is_parallel=True):
+    def __init__(self, attention_v, attention_t, attention_s, d_model, d_ff=None, dropout=0., activation="relu", pre_norm=False, is_parallel=True):
         super(MSPSTTEncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         self.attention_v = attention_v
@@ -906,7 +912,6 @@ class Model(nn.Module):
                                 ]
                             ),
                             d_model=configs.d_model,
-                            n_heads=configs.n_heads,
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,

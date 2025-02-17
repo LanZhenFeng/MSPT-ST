@@ -94,6 +94,7 @@ class FullAttention(nn.Module):
 
             queries = queries * self.scale
             attn_weight = queries @ keys.transpose(-2, -1)
+            attn_weight += attn_bias
             attn_weight = attn_weight.softmax(dim=-1)
             attn_weight = self.attn_drop(attn_weight)
             if self.output_attention:
@@ -1208,21 +1209,8 @@ class Model(nn.Module):
                     projection=PatchRecovery(self.img_size, self.patch_size, configs.c_out, configs.d_model)
                 )
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward_core(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # x_enc [B, T, H, W, C]
-
-        if kwargs.get('mask_true', None) is not None:
-            mask_true = kwargs['mask_true']
-        else:
-            if self.cls == 'ss':
-                raise ValueError("mask_true is required for SS")
-            mask_true = torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4], device=x_enc.device)
-        
-        if kwargs.get('batch_y', None) is not None:
-            batch_y = kwargs['batch_y'].to(x_enc.device) # [B, S, H, W, C]
-        else:
-            if self.cls == 'ss':
-                raise ValueError("batch_y is required for SS")
 
         # embedding
         enc_out = self.enc_embedding(x_enc, x_mark_enc) # -> [B, T, H', W', D]
@@ -1232,24 +1220,85 @@ class Model(nn.Module):
         enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
 
         # decoding
-        predictions = []
-        for t in range(self.pred_len):
-            if self.cls == "ss":
-                # schedule sampling
-                if t == 0:
-                    dec_inp = dec_out[:, :self.label_len]
-                else:
-                    new_frame = mask_true[:, t - 1] * batch_y[:, t - 1] + (1 - mask_true[:, t - 1]) * pred_frame.squeeze(1)
-                    dec_inp = torch.cat([dec_inp, new_frame.unsqueeze(1)], dim=1)
-            else:
-                # no curriculum learning strategy
-                if t == 0:
-                    dec_inp = dec_out[:, :self.label_len]
-                else:
-                    dec_inp = torch.cat([dec_inp, pred_frame], dim=1)
-            pred_frame = self.decoder(dec_inp, enc_out)
-            predictions.append(pred_frame)
+        dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
 
-        dec_out = torch.cat(predictions, dim=1) # -> [B, S, H', W', D]
+        return dec_out[:, -self.pred_len:]
 
-        return dec_out, None
+    # def forward_core(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    #     # x_enc [B, T, H, W, C]
+
+    #     if kwargs.get('mask_true', None) is not None:
+    #         mask_true = kwargs['mask_true']
+    #     else:
+    #         if self.cls == 'ss':
+    #             raise ValueError("mask_true is required for SS")
+    #         mask_true = torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4], device=x_enc.device)
+        
+    #     if kwargs.get('batch_y', None) is not None:
+    #         batch_y = kwargs['batch_y'].to(x_enc.device) # [B, S, H, W, C]
+    #     else:
+    #         if self.cls == 'ss':
+    #             raise ValueError("batch_y is required for SS")
+
+    #     x_dec_new = torch.cat([])
+
+    #     # embedding
+    #     enc_out = self.enc_embedding(x_enc, x_mark_enc) # -> [B, T, H', W', D]
+        
+    #     # encoding
+    #     enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
+
+    #     # decoding
+    #     predictions = []
+    #     for t in range(self.pred_len):
+    #         if self.cls == "ss":
+    #             # schedule sampling
+    #             if t == 0:
+    #                 dec_inp = x_dec[:, :self.label_len]
+    #             else:
+    #                 new_frame = mask_true[:, t - 1] * batch_y[:, t - 1] + (1 - mask_true[:, t - 1]) * dec_out[:, -1]
+    #                 dec_inp = torch.cat([dec_inp, new_frame.unsqueeze(1)], dim=1)
+    #         else:
+    #             # no curriculum learning strategy
+    #             if t == 0:
+    #                 dec_inp = x_dec[:, :self.label_len]
+    #             else:
+    #                 dec_inp = torch.cat([dec_inp, dec_out], dim=1)
+    #         dec_in = self.dec_embedding(dec_inp, x_mark_dec[:, :dec_inp.size(1)]) # -> [B, S, H', W', D]
+    #         dec_out = self.decoder(dec_in, enc_out)
+    #         predictions.append(dec_out)
+
+    #     dec_out = torch.cat(predictions, dim=1) # -> [B, S, H', W', D]
+
+    #     return dec_out, None
+
+    
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+        # x: input sequence, y: target sequence
+        # Initialize the conditioning tokens with the ground truth (teacher forcing)
+
+        if kwargs.get('batch_y', None) is not None:
+            batch_y = kwargs['batch_y'].to(x_enc.device) # [B, S, H, W, C]
+        else:
+            if self.cls == 'ss':
+                raise ValueError("batch_y is required for SS")
+
+        if self.training:
+
+            conditioning_tokens = batch_y[:, -self.pred_len:]
+            for _ in range(5):
+                # Generate predictions for the current pass
+                predictions = self.forward_core(x_enc, x_mark_enc, torch.cat([x_dec[:, :self.label_len], conditioning_tokens], dim=1), x_mark_dec)
+                
+                # Mix predictions with gold tokens
+                new_conditioning_tokens = conditioning_tokens.clone()
+                for t in range(self.pred_len):  # iterate over time steps
+                    if torch.rand(1).item() < 0.5:  # with probability p, use predicted token
+                        new_conditioning_tokens[:, t] = predictions[:, t]
+                    # else, keep the ground truth (this is the teacher-forcing step)
+                conditioning_tokens = new_conditioning_tokens
+
+            return predictions, None
+        
+        else:
+            return self.forward_core(x_enc, x_mark_enc, x_dec, x_mark_dec), None

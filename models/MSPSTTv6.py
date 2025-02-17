@@ -94,6 +94,7 @@ class FullAttention(nn.Module):
 
             queries = queries * self.scale
             attn_weight = queries @ keys.transpose(-2, -1)
+            attn_weight += attn_bias
             attn_weight = attn_weight.softmax(dim=-1)
             attn_weight = self.attn_drop(attn_weight)
             if self.output_attention:

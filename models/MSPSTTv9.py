@@ -94,7 +94,6 @@ class FullAttention(nn.Module):
 
             queries = queries * self.scale
             attn_weight = queries @ keys.transpose(-2, -1)
-            attn_weight += attn_bias
             attn_weight = attn_weight.softmax(dim=-1)
             attn_weight = self.attn_drop(attn_weight)
             if self.output_attention:
@@ -667,9 +666,11 @@ class MSPSTTEncoder(nn.Module):
     """
     def __init__(self, 
                  encoder_layers,
+                 downsample_layers,
                  norm_layer=None):
         super(MSPSTTEncoder, self).__init__()
         self.encoder_layers = nn.ModuleList(encoder_layers)
+        self.downsample_layers = nn.ModuleList(downsample_layers)
         self.norm = norm_layer
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
@@ -728,7 +729,7 @@ class MSPSTTDecoderLayer(nn.Module):
             x_t = self.norm_sa_t(x)
         else:
             x_t = x
-        x_t, self_attn_t = self.self_attention_t(x_t, x_t, x_t) # Temporal Self-Attention
+        x_t, self_attn_t = self.self_attention_t(x_t[:, -1:], x_t, x_t) # Temporal Self-Attention
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
             x_t = self.norm_sa_t(x_t)
@@ -782,7 +783,7 @@ class MSPSTTDecoderLayer(nn.Module):
         res = x
         if self.pre_norm:
             x = self.norm_sa_t(x)
-        x, self_attn_t = self.self_attention_t(x, x, x) # Temporal Self-Attention
+        x, self_attn_t = self.self_attention_t(x[:, -1:], x, x) # Temporal Self-Attention
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_sa_t(x)
@@ -913,11 +914,11 @@ class PatchMerging(nn.Module):
         self.reduction = nn.Linear(4 * dim, self.out_dim, bias=False)
 
     def forward(self, x):
-        B, H, W, C = x.shape
+        B, T, H, W, C = x.shape
         pad_values = (0, 0, 0, W % 2, 0, H % 2)
         x = F.pad(x, pad_values)
-        _, H, W, _ = x.shape
-        x = x.reshape(B, H // 2, 2, W // 2, 2, C).permute(0, 1, 3, 4, 2, 5).flatten(3)
+        _, _, H, W, _ = x.shape
+        x = x.reshape(B, T, H // 2, 2, W // 2, 2, C).permute(0, 1, 2, 4, 5, 3, 6).flatten(4)
         x = self.norm(x)
         x = self.reduction(x)
         return x
@@ -1052,6 +1053,7 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
+        self.label_len = configs.label_len
         self.pred_len = configs.pred_len
         self.e_layers = configs.e_layers
         self.d_model = configs.d_model
@@ -1062,6 +1064,11 @@ class Model(nn.Module):
         assert self.height % self.patch_size == 0, "Height must be divisible by patch size"
         assert self.width % self.patch_size == 0, "Width must be divisible by patch size"
 
+        # curriculum learning strategy
+        self.cls = configs.curriculum_learning_strategy # SS or Standard
+        curriculum_learning_strategies = ['ss', 'none']
+        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['ss', 'none']"
+
         self.enc_embedding = DataEmbedding(img_size=self.img_size, patch_size=configs.patch_size, in_chans=configs.enc_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
 
         self.dec_embedding = DataEmbedding(img_size=self.img_size, patch_size=configs.patch_size, in_chans=configs.dec_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
@@ -1071,7 +1078,7 @@ class Model(nn.Module):
                         MSPSTTEncoderLayer(
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=False,
@@ -1080,12 +1087,12 @@ class Model(nn.Module):
                                 FourierLayer(
                                     seq_len=configs.seq_len,
                                     top_k=configs.top_k,
-                                    d_model=configs.d_model,
-                                    img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                    d_model=configs.d_model * 2**i,
+                                    img_size=(configs.height//self.patch_size//2**i, configs.width//self.patch_size//2**i),
                                     fuse_drop=configs.dropout,
                                 ),
                                 seq_len=configs.seq_len,
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**i,
                                 n_heads=configs.n_heads,
                                 learned_pe=False,
                                 qkv_bias=True,
@@ -1096,7 +1103,7 @@ class Model(nn.Module):
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     window_size=window_size,
                                     qkv_bias=True,
@@ -1105,13 +1112,13 @@ class Model(nn.Module):
                                     qk_norm=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
+                                input_resolution=(configs.height//self.patch_size//2**i, configs.width//self.patch_size//2**i),
                                 window_size=window_size,
                                 shift_size=0 if (i % 2 == 0) else window_size//2,
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            d_model=configs.d_model,
+                            d_model=configs.d_model * 2**i,
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
@@ -1120,7 +1127,11 @@ class Model(nn.Module):
                         )
                         for i in range(configs.e_layers)
                     ],
-                    norm_layer=nn.LayerNorm(configs.d_model)
+                    [
+                        PatchMerging(dim=configs.d_model * 2**i, out_dim=configs.d_model * 2**(i+1))
+                        for i in range(configs.e_layers)
+                    ],
+                    norm_layer=nn.LayerNorm(configs.d_model * 2**configs.e_layers)
                 )
 
         self.decoder = MSPSTTDecoder(
@@ -1203,7 +1214,7 @@ class Model(nn.Module):
                     projection=PatchRecovery(self.img_size, self.patch_size, configs.c_out, configs.d_model)
                 )
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # x_enc [B, T, H, W, C]
 
         # embedding
@@ -1216,4 +1227,4 @@ class Model(nn.Module):
         # decoding
         dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
 
-        return dec_out, None
+        return dec_out[:, -self.pred_len:], None
