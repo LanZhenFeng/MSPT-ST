@@ -1024,20 +1024,20 @@ class Model(nn.Module):
                 )
 
         self.decoder = MSPSTTDecoder(
+                    SwinTransformerBlock(
+                        dim=configs.d_model * 2**configs.e_layers,
+                        input_resolution=(configs.height//self.patch_size//2**configs.e_layers, configs.width//self.patch_size//2**configs.e_layers),
+                        num_heads=configs.n_heads,
+                        window_size=window_size,
+                        shift_size=0,
+                        always_partition=False,
+                        dynamic_mask=False,
+                        qkv_bias=True,
+                        proj_drop=configs.dropout,
+                        attn_drop=configs.dropout,
+                        drop_path=configs.dropout,
+                    ),
                     [   
-                        SwinTransformerBlock(
-                            dim=configs.d_model * 2**configs.e_layers,
-                            input_resolution=(configs.height//self.patch_size//2**configs.e_layers, configs.width//self.patch_size//2**configs.e_layers),
-                            num_heads=configs.n_heads,
-                            window_size=window_size,
-                            shift_size=0,
-                            always_partition=False,
-                            dynamic_mask=False,
-                            qkv_bias=True,
-                            proj_drop=configs.dropout,
-                            attn_drop=configs.dropout,
-                            drop_path=configs.dropout,
-                        ),
                         MSPSTTDecoderLayer(
                             MultiScalePeriodicAttentionLayer(
                                 FullAttention(

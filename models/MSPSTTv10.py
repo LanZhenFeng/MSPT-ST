@@ -705,7 +705,7 @@ class MSPSTTDecoderLayer(nn.Module):
                  activation: str = "relu",
                  pre_norm: bool = False,
                  parallelize: bool = False):
-        super(MSPSTTEncoderLayer, self).__init__()
+        super(MSPSTTDecoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         activation = nn.ReLU if activation == "relu" else nn.GELU
         
@@ -842,9 +842,9 @@ class MSPSTTDecoder(nn.Module):
 
     def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         for i, (decoder_layer, upsample_layer) in enumerate(zip(self.decoder_layers, self.upsample_layers)):
-            x = decoder_layer(x, cross[-i-1], x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
             x = upsample_layer(x)
-
+            x, _ = decoder_layer(x, cross[-i-1], x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+            
         if self.norm is not None:
             x = self.norm(x)
 
@@ -935,8 +935,9 @@ class PatchExpanding(nn.Module):
     def forward(self, x):
         B, T, H, W, C = x.shape
         x = self.expand(x)
-        x = x.reshape(B, T, H, W, self.height_scale, self.width_scale, C // self.height_scale*self.width_scale)
-        x = x.permute(0, 1, 2, 4, 3, 5, 6).reshape(B, T, H * self.height_scale, W * self.width_scale, C // self.height_scale*self.width_scale)
+        D = x.shape[-1]
+        x = x.reshape(B, T, H, W, self.height_scale, self.width_scale, D // (self.height_scale*self.width_scale))
+        x = x.permute(0, 1, 2, 4, 3, 5, 6).reshape(B, T, H * self.height_scale, W * self.width_scale, D // (self.height_scale*self.width_scale))
         x = self.norm(x)
         return x
 
@@ -1090,7 +1091,7 @@ class Model(nn.Module):
                             ),
                             WindowAttentionLayer(
                                 MyWindowAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**i,
                                     n_heads=configs.n_heads,
                                     window_size=window_size,
                                     qkv_bias=True,
@@ -1105,7 +1106,7 @@ class Model(nn.Module):
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),
-                            d_model=configs.d_model,
+                            d_model=configs.d_model * 2**i,
                             d_ff=configs.d_ff,
                             dropout=configs.dropout,
                             activation=configs.activation,
@@ -1129,13 +1130,13 @@ class Model(nn.Module):
                         MSPSTTDecoderLayer(
                             TemporalAttentionLayer(
                                 FullAttention(
-                                    d_model=configs.d_model,
+                                    d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                     n_heads=configs.n_heads,
                                     attn_drop=configs.dropout,
                                     is_causal=False,
                                     output_attention=configs.output_attention,
                                 ),
-                                d_model=configs.d_model,
+                                d_model=configs.d_model * 2**(configs.e_layers - i - 1),
                                 n_heads=configs.n_heads,
                                 qkv_bias=True,
                                 qk_norm=False,
@@ -1190,15 +1191,15 @@ class Model(nn.Module):
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
 
         # encoding
-        enc_out, _ = self.encoder(x_enc) # -> [B, T, H, W, D]
+        enc_out, cross = self.encoder(enc_out) # -> [B, T, H, W, D]
 
         # high-level feature prediction
-        enc_out = rearrange(enc_out, 'b t h w d -> b h w (t d)')
-        dec_inp = self.predictor(self.norm(enc_out)) # -> [B, T, H, W, D]
-        dec_inp = rearrange(dec_inp, 'b h w (t d) -> b t h w d', t=1)
+        enc_out = rearrange(self.norm(enc_out), 'b t h w d -> b h w (t d)')
+        enc_out = self.predictor(enc_out) # -> [B, T, H, W, D]
+        enc_out = rearrange(enc_out, 'b h w (t d) -> b t h w d', t=1)
 
         # decoding
-        dec_out = self.decoder(dec_inp)
+        dec_out = self.decoder(enc_out, cross)
 
         return dec_out
 
@@ -1210,24 +1211,23 @@ class Model(nn.Module):
         if kwargs.get('batch_y', None) is not None:
             batch_y = kwargs['batch_y'].to(x_enc.device)[:, -self.pred_len:]
 
-        x_mark = torch.cat([x_mark_enc, x_mark_dec[:, -self.pred_len:]], dim=1)
+        total_mark = torch.cat([x_mark_enc, x_mark_dec[:, -self.pred_len:]], dim=1)
 
         if self.training:
             predictions = []
-            enc_inp = x_enc
             for t in range(self.pred_len):
-                pred = self.forward_core(enc_inp, x_mark[t:t+self.seq_len])
+                pred = self.forward_core(x_enc, total_mark[:, t:t+self.seq_len])
                 predictions.append(pred)
                 if t < self.pred_len - 1:
                     add = mask_true[:, t] * batch_y[:, t] + (1 - mask_true[:, t]) * pred.squeeze(1)
-                    enc_inp = torch.cat([enc_inp[:, 1:], add.unsqueeze(1)], dim=1)
+                    x_enc = torch.cat([x_enc[:, 1:], add.unsqueeze(1)], dim=1)
             
             predictions = torch.cat(predictions, dim=1)
             return predictions, None
         else:
             predictions = []
             for t in range(self.pred_len):
-                pred = self.forward_core(x_enc, x_mark[t:t+self.seq_len])
+                pred = self.forward_core(x_enc, total_mark[:, t:t+self.seq_len])
                 predictions.append(pred)
                 x_enc = torch.cat([x_enc[:, 1:], pred], dim=1)
 
