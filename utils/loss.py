@@ -1,6 +1,70 @@
 import torch
 import torch.nn as nn
 
+
+class MSELoss(nn.Module):
+    def __init__(self, auxiliary_loss_weight=0.):
+        super().__init__()
+        self.mse_loss = nn.MSELoss()
+        self.auxiliary_loss_weight = auxiliary_loss_weight
+    
+    def forward(self, input, target):
+        # input [batch, length, height, width, channel] or ([batch, length, channel, height, width], auxiliary_loss)
+        # target [batch, length, height, width, channel]
+        if isinstance(input, tuple):
+            input, auxiliary_loss = input
+
+        loss = self.mse_loss(input, target)
+
+        if auxiliary_loss is None:
+            return loss
+        else:
+            return loss + self.auxiliary_loss_weight * auxiliary_loss
+
+
+class MAELoss(nn.Module):
+    def __init__(self, auxiliary_loss_weight=0.):
+        super().__init__()
+        self.mae_loss = nn.L1Loss()
+        self.auxiliary_loss_weight = auxiliary_loss_weight
+    
+    def forward(self, input, target):
+        # input [batch, length, height, width, channel] or ([batch, length, channel, height, width], auxiliary_loss)
+        # target [batch, length, height, width, channel]
+        if isinstance(input, tuple):
+            input, auxiliary_loss = input
+
+        loss = self.mae_loss(input, target)
+
+        if auxiliary_loss is None:
+            return loss
+        else:
+            return loss + self.auxiliary_loss_weight * auxiliary_loss
+
+
+class MSEMAELoss(nn.Module):
+    def __init__(self, auxiliary_loss_weight=0.):
+        super().__init__()
+        self.mse_loss = nn.MSELoss()
+        self.mae_loss = nn.L1Loss()
+        self.auxiliary_loss_weight = auxiliary_loss_weight
+    
+    def forward(self, input, target):
+        # input [batch, length, height, width, channel] or ([batch, length, channel, height, width], auxiliary_loss)
+        # target [batch, length, height, width, channel]
+        if isinstance(input, tuple):
+            input, auxiliary_loss = input
+
+        loss_mse = self.mse_loss(input, target)
+        loss_mae = self.mae_loss(input, target)
+        loss = loss_mse + loss_mae
+
+        if auxiliary_loss is None:
+            return loss
+        else:
+            return loss + self.auxiliary_loss_weight * auxiliary_loss
+
+
 class MaskedMSELoss(nn.Module):
     def __init__(self, auxiliary_loss_weight=0.):
         super().__init__()

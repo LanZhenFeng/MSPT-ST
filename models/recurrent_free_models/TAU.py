@@ -66,7 +66,7 @@ class Model(nn.Module):
         y = rearrange(Y, 'b t c h w -> b t h w c')
         return y
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
 
         if self.seq_len >= self.pred_len:
             y = self.forward_core(x_enc)[:,:self.pred_len]
@@ -84,13 +84,11 @@ class Model(nn.Module):
                 ys.append(x[:,:r])
             y = torch.cat(ys, dim=1)
         
-        if kwargs.get('batch_y', None) is not None:
-            # auxiliary loss
-            batch_y = kwargs.get('batch_y')
-            auxiliary_loss = self.diff_div_reg(y, batch_y[:, -self.pred_len:])
-            return y, auxiliary_loss
-        else:
-            raise ValueError("batch_y is required for auxiliary loss in TAU")
+        # auxiliary loss
+        batch_y = x_dec[:, -self.pred_len:]
+        auxiliary_loss = self.diff_div_reg(y, batch_y)
+        return y, auxiliary_loss
+
 
 
 def sampling_generator(N, reverse=False):

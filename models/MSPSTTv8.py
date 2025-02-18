@@ -1273,15 +1273,11 @@ class Model(nn.Module):
     #     return dec_out, None
 
     
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x: input sequence, y: target sequence
         # Initialize the conditioning tokens with the ground truth (teacher forcing)
 
-        if kwargs.get('batch_y', None) is not None:
-            batch_y = kwargs['batch_y'].to(x_enc.device) # [B, S, H, W, C]
-        else:
-            if self.cls == 'ss':
-                raise ValueError("batch_y is required for SS")
+        batch_y = x_dec[:, -self.pred_len:]
 
         if self.training:
 

@@ -943,7 +943,7 @@ class Model(nn.Module):
 
         return dec_out
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         if self.seq_len >= self.pred_len:
             return self.forward_core(x_enc, x_mark_enc)[:,:self.pred_len], None
         else:

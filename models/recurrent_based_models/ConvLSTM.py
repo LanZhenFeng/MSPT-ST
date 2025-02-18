@@ -4,17 +4,6 @@ import torch.nn.functional as F
 
 from einops import rearrange
 
-# # add layers to the system path ../../layers
-# import sys
-# import os
-# # 获取当前文件的目录
-# current_dir = os.path.dirname(os.path.abspath(__file__))
-# # 获取上上层目录
-# parent_dir = os.path.dirname(current_dir)
-# upper_parent_dir = os.path.dirname(parent_dir)
-# # 将上上层目录添加到 sys.path
-# if upper_parent_dir not in sys.path:
-#     sys.path.append(upper_parent_dir)
 from layers.OpenSTL_Modules import ConvLSTMCell
 
 
@@ -38,9 +27,9 @@ class Model(nn.Module):
         self.layer_norm = layer_norm
 
         # curriculum learning strategy
-        self.cls = configs.curriculum_learning_strategy # RSS, SS or Standard
-        curriculum_learning_strategies = ['rss', 'ss', 's']
-        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 's']"
+        self.cls = configs.curriculum_learning_strategy # RSS, SS or None
+        curriculum_learning_strategies = ['rss', 'ss', 'none']
+        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 'none']"
 
         cell_list = []
         self.d_patch = configs.patch_size * configs.patch_size * configs.enc_in
@@ -58,23 +47,13 @@ class Model(nn.Module):
         for i in range(1, self.num_layers):
             h_t[i], c_t[i] = self.cell_list[i](h_t[i - 1], h_t[i], c_t[i])
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
-        if kwargs.get('mask_true', None) is not None:
-            mask_true = kwargs['mask_true']
-        else:
-            if self.cls in ['rss', 'ss']:
-                raise ValueError("mask_true is required for RSS and SS")
-            mask_true = torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4], device=x_enc.device)
         
+        assert self.cls == 'none' or mask_true is not None, "mask_true is required for RSS and SS"
         mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
 
-        if kwargs.get('batch_y', None) is not None:
-            batch_y = kwargs['batch_y'].to(x_enc.device)
-            x_enc = torch.cat([x_enc, batch_y[:, -self.seq_len:]], dim=1)
-        else:
-            if self.cls in ['rss', 'ss']:
-                raise ValueError("batch_y is required for RSS and SS")
+        x_enc = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)
 
         # patching
         x_ts = rearrange(x_enc, 'b t (p1 h) (p2 w) c -> b t (c p1 p2) h w', p1=self.configs.patch_size, p2=self.configs.patch_size)
@@ -122,35 +101,3 @@ class Model(nn.Module):
         dec_out = rearrange(dec_out, 'b t (c p1 p2) h w -> b t (p1 h) (p2 w) c', p1=self.configs.patch_size, p2=self.configs.patch_size)
         
         return dec_out, None
-
-if __name__ == "__main__":
-
-    import os
-    import sys
-
-    class Args:
-        pass
-
-    configs = Args()
-    configs.seq_len = 30
-    configs.pred_len = 30
-    configs.patch_size = 2
-    configs.height = 64
-    configs.width = 64
-    configs.enc_in = 11
-    configs.d_model = 128
-    configs.e_layers = 4
-    configs.curriculum_learning_strategy = 'none'
-    configs.device = 'cuda'
-
-    model = Model(configs).to(configs.device)
-    print(model)
-
-    x_enc = torch.randn(2, configs.seq_len, configs.height, configs.width, configs.enc_in).to(configs.device)
-    x_mark_enc = torch.randn(2, configs.seq_len, 4).to(configs.device)
-    x_dec = torch.randn(2, configs.pred_len, configs.height, configs.width, configs.enc_in).to(configs.device)
-    x_mark_dec = torch.randn(2, configs.pred_len, 4).to(configs.device)
-
-    dec_out, loss = model(x_enc, x_mark_enc, x_dec, x_mark_dec, None)
-    print(dec_out.shape)
-    print(dec_out)

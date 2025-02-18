@@ -1,7 +1,8 @@
 import argparse
 import os
 import torch
-from exp.exp_main import Exp_Main
+# from exp.exp_main_rb import Exp_Main
+# from exp.exp_main_rf import Exp_Main
 import random
 import numpy as np
 
@@ -133,6 +134,12 @@ if __name__ == '__main__':
 
     print('Args in experiment:')
     print(args)
+
+    if args.data == 'spatiotemporal':
+        from exp.exp_main_rf import Exp_Main
+
+    elif args.data == 'spatiotemporalv2':
+        from exp.exp_main_rb import Exp_Main
     
     Exp = Exp_Main
 

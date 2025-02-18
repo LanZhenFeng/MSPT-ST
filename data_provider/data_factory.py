@@ -3,11 +3,12 @@ from torch.utils.data import DataLoader
 
 data_dict = {
     'temporal': Dataset_Temporal,
-    'spatiotemporal': Dataset_SpatioTemporalv2,
+    'spatiotemporal': Dataset_SpatioTemporal,
+    'spatiotemporalv2': Dataset_SpatioTemporalv2,
 }
 
 
-def data_provider(args, shared_scaler, flag, test_batch_size=1, pin_memory=False):
+def data_provider(args, flag, test_batch_size=1, pin_memory=False, shared_scaler=None):
     Data = data_dict[args.data]
     timeenc = 0 if args.embed != 'timeF' else 1
 
@@ -22,17 +23,29 @@ def data_provider(args, shared_scaler, flag, test_batch_size=1, pin_memory=False
         batch_size = args.batch_size  # bsz for train and valid
         freq = args.freq
 
-    data_set = Data(
-        shared_scaler=shared_scaler,
-        root_path=args.root_path,
-        data_path=args.data_path,
-        flag=flag,
-        size=[args.seq_len, args.label_len, args.pred_len],
-        features=args.features,
-        target=args.target,
-        timeenc=timeenc,
-        freq=freq,
-    )
+    if shared_scaler is not None:
+        data_set = Data(
+            shared_scaler=shared_scaler,
+            root_path=args.root_path,
+            data_path=args.data_path,
+            flag=flag,
+            size=[args.seq_len, args.label_len, args.pred_len],
+            features=args.features,
+            target=args.target,
+            timeenc=timeenc,
+            freq=freq,
+        )
+    else:
+        data_set = Data(
+            root_path=args.root_path,
+            data_path=args.data_path,
+            flag=flag,
+            size=[args.seq_len, args.label_len, args.pred_len],
+            features=args.features,
+            target=args.target,
+            timeenc=timeenc,
+            freq=freq,
+        )
     print(flag, len(data_set))
     data_loader = DataLoader(
         data_set,

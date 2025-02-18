@@ -58,7 +58,7 @@ class Model(nn.Module):
         y = rearrange(Y, 'b t c h w -> b t h w c')
         return y
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         
         if self.seq_len >= self.pred_len:
             return self.forward_core(x_enc)[:,:self.pred_len], None

@@ -1260,7 +1260,7 @@ class Model(nn.Module):
                     projection=PatchRecovery(self.img_size, self.patch_size, configs.c_out, configs.d_model)
                 )
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         # x_enc [B, T, H, W, C]
 
         # embedding

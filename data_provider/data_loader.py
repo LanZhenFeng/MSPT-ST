@@ -227,7 +227,7 @@ class Dataset_SpatioTemporalPKL(Dataset):
 
 class Dataset_SpatioTemporal(Dataset):
     def __init__(self, root_path, flag='train', size=None,
-                 features='S', data_path='scs_lat_0to24_lon_105to121_targetsst.npy',
+                 features='S', data_path='scs_lat_12to20_lon_111to119_targetsst.npy',
                  target='OT', scale=True, timeenc=0, freq='h'):
         # size [seq_len, label_len, pred_len]
         # info
@@ -257,10 +257,8 @@ class Dataset_SpatioTemporal(Dataset):
     def __read_data__(self):
         self.scaler = StandardScaler()
         data_raw = np.load(os.path.join(self.root_path, self.data_path), mmap_mode='r')
-        data_raw = np.nan_to_num(data_raw, nan=0.0)
-        mask_ocean = np.load(os.path.join(self.root_path, 'scs_lat_0to24_lon_105to121_maskocean.npy'), mmap_mode='r')
         '''
-        df_raw.columns: ['metadata', 'sst', ...(other features), 'lat', 'lon', 'time']
+        df_raw.columns: [...(other features), 'sst']
         '''
         date = pd.date_range(start='1981-09-01', end='2022-12-31', freq='D')
         date = pd.DataFrame(date, columns=['date'])
@@ -269,8 +267,6 @@ class Dataset_SpatioTemporal(Dataset):
             pass
         elif self.features == 'S':
             data_raw = data_raw[-1:] # (15097,96,64,1)
-
-        self.mask = mask_ocean
 
         total_length = data_raw.shape[0]
         num_train = int(total_length * 0.7)
@@ -319,7 +315,7 @@ class Dataset_SpatioTemporal(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
         
-        return seq_x, seq_y, np.float64(seq_x_mark), np.float64(seq_y_mark), self.mask
+        return seq_x, seq_y, np.float64(seq_x_mark), np.float64(seq_y_mark)
 
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1

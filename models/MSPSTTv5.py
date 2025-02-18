@@ -908,16 +908,13 @@ class Model(nn.Module):
 
         return dec_out.squeeze(1)
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
-        if kwargs.get('mask_true', None) is not None:
-            mask_true = kwargs['mask_true']
         
-        if kwargs.get('batch_y', None) is not None:
-            batch_y = kwargs['batch_y'].to(x_enc.device)
-            x_ts = torch.cat([x_enc, batch_y[:, -self.seq_len:]], dim=1)
-        else:
-            x_ts = x_enc
+        assert self.cls == 'none' or mask_true is not None, "mask_true is required for RSS and SS"
+        mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
+
+        x_ts = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)
 
         x_mark = torch.cat([x_mark_enc, x_mark_dec[:, -self.seq_len:]], dim=1)
 

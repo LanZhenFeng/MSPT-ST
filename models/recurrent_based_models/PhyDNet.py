@@ -130,23 +130,13 @@ class Model(nn.Module):
                 ind +=1
         return constraints 
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
-        if kwargs.get('mask_true', None) is not None:
-            mask_true = kwargs['mask_true']
-        else:
-            if self.cls in ['rss', 'ss']:
-                raise ValueError("mask_true is required for RSS and SS")
-            mask_true = torch.zeros(x_enc.shape[0], self.pred_len, x_enc.shape[2], x_enc.shape[3], x_enc.shape[4], device=x_enc.device)
         
-        mask_true = rearrange(mask_true, 'b t h w (c p1 p2) -> b t c (p1 h) (p2 w)', p1=self.configs.patch_size, p2=self.configs.patch_size)
-        
-        if kwargs.get('batch_y', None) is not None:
-            batch_y = kwargs['batch_y'].to(x_enc.device)
-            x_enc = torch.cat([x_enc, batch_y[:, -self.seq_len:]], dim=1)
-        else:
-            if self.cls in ['rss', 'ss']:
-                raise ValueError("batch_y is required for RSS and SS")
+        assert self.cls == 'none' or mask_true is not None, "mask_true is required for RSS and SS"
+        mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
+
+        x_enc = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)
 
         x_ts = rearrange(x_enc, 'b t h w c -> b t c h w')
         
