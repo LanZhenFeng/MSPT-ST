@@ -19,6 +19,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
     parser.add_argument('--model', type=str, required=True, default='MSPT',
                         help='model name, options: [MSPT, MSPT-ST]')
+    parser.add_argument('--model_type', type=str, default='rb', help='model type, options: [rb, rf]')
 
     # data loader
     parser.add_argument('--data', type=str, required=True, default='spatiotemporal', help='dataset type, options: [temporal, spatiotemporal]')
@@ -120,10 +121,10 @@ if __name__ == '__main__':
     # special setting for SimVP
     args.model_print = args.model
     if args.model.startswith('SimVP_'):
-        args.model_type = args.model.split('_')[1]
+        args.attn_type = args.model.split('_')[1]
         args.model = 'SimVP'
-        model_types = ['gSTA', 'ConvMixer', 'ConvNeXt', 'HorNet', 'MLPMixer', 'MogaNet', 'Poolformer', 'Swin', 'Uniformer', 'VAN', 'ViT']
-        assert args.model_type in model_types, 'model type should be in {}'.format(model_types)
+        attn_types = ['gSTA', 'ConvMixer', 'ConvNeXt', 'HorNet', 'MLPMixer', 'MogaNet', 'Poolformer', 'Swin', 'Uniformer', 'VAN', 'ViT']
+        assert args.attn_type in attn_types, 'model type should be in {}'.format(attn_types)
 
     # special setting for PredFormer
     if args.model.startswith('PredFormer_'):
@@ -136,10 +137,10 @@ if __name__ == '__main__':
     print(args)
 
     if args.data == 'spatiotemporal':
-        from exp.exp_main_rf import Exp_Main
+        from exp.exp_main_v1 import Exp_Main
 
     elif args.data == 'spatiotemporalv2':
-        from exp.exp_main_rb import Exp_Main
+        from exp.exp_main_v2 import Exp_Main
     
     Exp = Exp_Main
 
@@ -178,9 +179,10 @@ if __name__ == '__main__':
             exp.cal_metrics(setting)
     else:
         ii = 0
-        setting = '{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
+        setting = '{}_{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
             args.model_id,
             args.model_print,
+            args.model_type,
             args.data,
             args.features,
             args.height,

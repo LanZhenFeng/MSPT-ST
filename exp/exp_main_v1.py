@@ -3,7 +3,7 @@ from data_provider.data_loader import SharedStandardScaler
 from exp.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, TrainTracking, CurriculumLearning, adjust_learning_rate, visual, visual_st
 from utils.metrics import metric, metric_st
-from utils.loss import MaskedMSELoss, MaskedMAELoss, MaskedMSEMAELoss
+from utils.loss import MSELoss, MAELoss, MSEMAELoss
 import torch
 import torch.nn as nn
 from torch import optim
@@ -17,12 +17,11 @@ warnings.filterwarnings('ignore')
 
 class Exp_Main(Exp_Basic):
     r"""
-    Expersiment Main Class for recurrent-based models such as ConvLSTM, PredRNN, etc.
+    Expersiment Main Class for SST Spatial-Temporal Dataset without Mask (Land or Ocean)
     """
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
-        assert args.data == 'spatiotemporalv2', 'Only spatiotemporalv2 data is supported'
-        self.shared_scaler = SharedStandardScaler()
+        assert args.data == 'spatiotemporal', 'Data type should be "spatiotemporal"'
         self.curriculum_learning = CurriculumLearning(args)
 
     def _build_model(self):
@@ -33,7 +32,7 @@ class Exp_Main(Exp_Basic):
         return model
 
     def _get_data(self, flag, test_batch_size=1):
-        data_set, data_loader = data_provider(self.args, flag, test_batch_size, shared_scaler=self.shared_scaler)
+        data_set, data_loader = data_provider(self.args, flag, test_batch_size)
         return data_set, data_loader
 
     def _select_optimizer(self):
@@ -63,11 +62,11 @@ class Exp_Main(Exp_Basic):
 
     def _select_criterion(self):
         if self.args.loss == 'MSE':
-            criterion = MaskedMSELoss(self.args.auxiliary_loss_weight)
+            criterion = MSELoss(self.args.auxiliary_loss_weight)
         elif self.args.loss == 'MAE':
-            criterion = MaskedMAELoss(self.args.auxiliary_loss_weight)
+            criterion = MAELoss(self.args.auxiliary_loss_weight)
         elif self.args.loss == 'MSE+MAE':
-            criterion = MaskedMSEMAELoss(self.args.auxiliary_loss_weight)
+            criterion = MSEMAELoss(self.args.auxiliary_loss_weight)
         return criterion
 
     def _makedirs(self):
@@ -78,43 +77,46 @@ class Exp_Main(Exp_Basic):
         if not os.path.exists(self.test_results_save_path):
             os.makedirs(self.test_results_save_path)
 
-    def _model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs):
+    def _model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true, **kwargs):
         if self.args.use_amp:
             with torch.amp.autocast('cuda'):
-                outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
+                outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true, **kwargs)
         else:
-            outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
+            outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true, **kwargs)
         if aux_loss is not None and self.args.use_multi_gpu and self.args.use_gpu:
             aux_loss = aux_loss.mean()
         return outputs, aux_loss
     
     def vali(self, vali_data, vali_loader, criterion):
-        mask = torch.from_numpy(vali_data.mask)
         total_loss = []
         self.model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # mask for identifing the ocean area in SST ST forecasting task (or other tasks with mask)
-                mask = mask.float().to(self.device)
-                
                 # decoder input
+                if self.args.model_type == 'rb':
+                    dec_inp = batch_y.to(self.device)
+                else:
+                    dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
+                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
 
+                # mask_true
                 mask_true = self.curriculum_learning.get_mask_true_on_testing(batch_x.shape[0])
                 if mask_true is not None:
                     mask_true = mask_true.float().to(self.device)
+
                 # encoder - decoder
-                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, batch_y, batch_y_mark, mask_true=mask_true)
+                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true)
                 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
 
-                loss = criterion((outputs, aux_loss), batch_y, mask)
+                loss = criterion((outputs, aux_loss), batch_y)
                 total_loss.append(loss.item())
         total_loss = np.average(total_loss)
         self.model.train()
@@ -124,8 +126,6 @@ class Exp_Main(Exp_Basic):
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test', test_batch_size=self.args.batch_size)
-
-        mask = torch.from_numpy(train_data.mask)
 
         self.model_save_path = os.path.join(self.args.model_save_path, setting)
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
@@ -142,7 +142,7 @@ class Exp_Main(Exp_Basic):
 
         criterion = self._select_criterion()
         # test_criterion = self._select_criterion()
-        test_criterion = MaskedMSELoss()
+        test_criterion = MSELoss()
         
         self._makedirs()
 
@@ -180,24 +180,29 @@ class Exp_Main(Exp_Basic):
                 model_optim.zero_grad()
 
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # mask for identifing the ocean area in SST ST forecasting task (or other tasks with mask)
-                mask = mask.float().to(self.device)
+                # decoder input
+                if self.args.model_type == 'rb':
+                    dec_inp = batch_y.to(self.device)
+                else:
+                    dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
+                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
 
+                # mask_true
                 mask_true = self.curriculum_learning.get_mask_true_on_training(num_updates, batch_x.shape[0])
                 if mask_true is not None:
                     mask_true = mask_true.float().to(self.device)
 
                 # encoder - decoder
-                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, batch_y, batch_y_mark, mask_true=mask_true)
+                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
                 
-                loss = criterion((outputs, aux_loss), batch_y, mask)
+                loss = criterion((outputs, aux_loss), batch_y)
                 train_loss.append(loss.item())
 
                 train_track(i, epoch, loss)
@@ -213,8 +218,6 @@ class Exp_Main(Exp_Basic):
                 if self.args.lradj == "onecycle":
                     scheduler.step()
 
-                num_updates += 1
-        
             if self.args.lradj != "onecycle":
                 scheduler.step()
 
@@ -236,7 +239,6 @@ class Exp_Main(Exp_Basic):
     def test(self, setting, load_weight=True):
         test_batch_size = self.args.batch_size if self.args.model == 'MIM' else 1
         test_data, test_loader = self._get_data(flag='test', test_batch_size=test_batch_size)
-        mask = torch.from_numpy(test_data.mask)
         if load_weight:
             print('loading supervised model weight')
             self.model.load_state_dict(torch.load(os.path.join(self.args.model_save_path + setting, 'checkpoint.pth'), map_location=self.device))
@@ -263,24 +265,29 @@ class Exp_Main(Exp_Basic):
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
                 batch_x = batch_x.float().to(self.device)
-                batch_y = batch_y.float().to(self.device)
+                batch_y = batch_y.float()
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
-                # mask for identifing the ocean area in SST ST forecasting task (or other tasks with mask)
-                mask = mask.float().to(self.device)
+                # decoder input
+                if self.args.model_type == 'rb':
+                    dec_inp = batch_y.to(self.device)
+                else:
+                    dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
+                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
 
+                # mask_true
                 mask_true = self.curriculum_learning.get_mask_true_on_testing(batch_x.shape[0])
                 if mask_true is not None:
                     mask_true = mask_true.float().to(self.device)
 
                 # encoder - decoder
-                outputs, _ = self._model_forward(batch_x, batch_x_mark, batch_y, batch_y_mark, mask_true=mask_true)
+                outputs, _ = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
@@ -321,13 +328,6 @@ class Exp_Main(Exp_Basic):
         trues = trues.reshape(-1, preds.shape[-4], preds.shape[-3], trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
-        mask = mask.detach().cpu().numpy().astype(np.bool_)
-        mask = mask[None, None, :, :, None]
-        print(mask.shape)
-
-        preds *= mask
-        trues *= mask
-
         np.save(results_save_path + 'pred.npy', preds)
         np.save(results_save_path + 'true.npy', trues)
 
@@ -354,12 +354,15 @@ class Exp_Main(Exp_Basic):
         input_mark = torch.randn(1, self.args.seq_len, 3).to(self.device)
         dec_inp = torch.randn(1, self.args.label_len+self.args.pred_len, self.args.height, self.args.width, self.args.dec_in).to(self.device)
         dec_inp_mark = torch.randn(1, self.args.label_len+self.args.pred_len, 3).to(self.device)
+        # trues = torch.randn(1, 30, 96, 64, 14).to(self.device)
+        # extra_input = {'batch_y': trues}
 
-        mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
-        if mask_true is not None:
-            mask_true = mask_true.float().to(self.device)
+        # mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
+        # if mask_true is not None:
+        #     mask_true = mask_true.float().to(self.device)
+        #     extra_input['mask_true'] = mask_true
 
-        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark, mask_true))
+        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark))
 
         flops_1 = f"{flops / 10**9:.3f}G"
         params_1 = f"{params / 10**6:.3f}M"

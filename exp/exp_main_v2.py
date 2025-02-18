@@ -1,8 +1,9 @@
 from data_provider.data_factory import data_provider
+from data_provider.data_loader import SharedStandardScaler
 from exp.exp_basic import Exp_Basic
-from utils.tools import EarlyStopping, TrainTracking, adjust_learning_rate, visual, visual_st
+from utils.tools import EarlyStopping, TrainTracking, CurriculumLearning, adjust_learning_rate, visual, visual_st
 from utils.metrics import metric, metric_st
-from utils.loss import MSELoss, MAELoss, MSEMAELoss
+from utils.loss import MaskedMSELoss, MaskedMAELoss, MaskedMSEMAELoss
 import torch
 import torch.nn as nn
 from torch import optim
@@ -16,11 +17,13 @@ warnings.filterwarnings('ignore')
 
 class Exp_Main(Exp_Basic):
     r"""
-    Expersiment Main Class for recurrent-free models such as SimVP, TAU, etc.
+    Expersiment Main Class for SST Spatial-Temporal Dataset with Mask (Land or Ocean)
     """
     def __init__(self, args):
         super(Exp_Main, self).__init__(args)
-        assert args.data == 'spatiotemporal', 'Only spatiotemporal data is supported for recurrent-free models'
+        assert args.data == 'spatiotemporalv2', 'Data type should be "spatiotemporalv2"'
+        self.shared_scaler = SharedStandardScaler()
+        self.curriculum_learning = CurriculumLearning(args)
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -30,12 +33,12 @@ class Exp_Main(Exp_Basic):
         return model
 
     def _get_data(self, flag, test_batch_size=1):
-        data_set, data_loader = data_provider(self.args, flag, test_batch_size)
+        data_set, data_loader = data_provider(self.args, flag, test_batch_size, shared_scaler=self.shared_scaler)
         return data_set, data_loader
 
     def _select_optimizer(self):
-        # model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
-        model_optim = optim.AdamW(self.model.parameters(), lr=self.args.learning_rate)
+        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        # model_optim = optim.AdamW(self.model.parameters(), lr=self.args.learning_rate)
         return model_optim
     
     def _select_scheduler(self, optimizer, lr, train_steps, train_epochs):
@@ -60,11 +63,11 @@ class Exp_Main(Exp_Basic):
 
     def _select_criterion(self):
         if self.args.loss == 'MSE':
-            criterion = MSELoss(self.args.auxiliary_loss_weight)
+            criterion = MaskedMSELoss(self.args.auxiliary_loss_weight)
         elif self.args.loss == 'MAE':
-            criterion = MAELoss(self.args.auxiliary_loss_weight)
+            criterion = MaskedMAELoss(self.args.auxiliary_loss_weight)
         elif self.args.loss == 'MSE+MAE':
-            criterion = MSEMAELoss(self.args.auxiliary_loss_weight)
+            criterion = MaskedMSEMAELoss(self.args.auxiliary_loss_weight)
         return criterion
 
     def _makedirs(self):
@@ -75,17 +78,18 @@ class Exp_Main(Exp_Basic):
         if not os.path.exists(self.test_results_save_path):
             os.makedirs(self.test_results_save_path)
 
-    def _model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs):
+    def _model_forward(self, batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true, **kwargs):
         if self.args.use_amp:
             with torch.amp.autocast('cuda'):
-                outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
+                outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true, **kwargs)
         else:
-            outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, **kwargs)
+            outputs, aux_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true, **kwargs)
         if aux_loss is not None and self.args.use_multi_gpu and self.args.use_gpu:
             aux_loss = aux_loss.mean()
         return outputs, aux_loss
     
     def vali(self, vali_data, vali_loader, criterion):
+        self.mask = torch.from_numpy(vali_data.mask).to(self.device)
         total_loss = []
         self.model.eval()
         with torch.no_grad():
@@ -96,17 +100,25 @@ class Exp_Main(Exp_Basic):
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
                 # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
+                if self.args.model_type == 'rb':
+                    dec_inp = batch_y.to(self.device)
+                else:
+                    dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
+                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
+
+                # mask_true
+                mask_true = self.curriculum_learning.get_mask_true_on_testing(batch_x.shape[0])
+                if mask_true is not None:
+                    mask_true = mask_true.float().to(self.device)
 
                 # encoder - decoder
-                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true)
                 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
 
-                loss = criterion((outputs, aux_loss), batch_y)
+                loss = criterion((outputs, aux_loss), batch_y, self.mask)
                 total_loss.append(loss.item())
         total_loss = np.average(total_loss)
         self.model.train()
@@ -116,6 +128,8 @@ class Exp_Main(Exp_Basic):
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test', test_batch_size=self.args.batch_size)
+
+        self.mask = torch.from_numpy(train_data.mask).to(self.device)
 
         self.model_save_path = os.path.join(self.args.model_save_path, setting)
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
@@ -132,7 +146,7 @@ class Exp_Main(Exp_Basic):
 
         criterion = self._select_criterion()
         # test_criterion = self._select_criterion()
-        test_criterion = MSELoss()
+        test_criterion = MaskedMSELoss()
         
         self._makedirs()
 
@@ -162,6 +176,8 @@ class Exp_Main(Exp_Basic):
             train_track = TrainTracking(self.args.train_epochs, train_steps)
             train_loss = []
 
+            num_updates = epoch * train_steps
+
             self.model.train()
             epoch_time = time.time()
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
@@ -173,16 +189,24 @@ class Exp_Main(Exp_Basic):
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
                 # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
+                if self.args.model_type == 'rb':
+                    dec_inp = batch_y.to(self.device)
+                else:
+                    dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
+                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
+
+                # mask_true
+                mask_true = self.curriculum_learning.get_mask_true_on_training(num_updates, batch_x.shape[0])
+                if mask_true is not None:
+                    mask_true = mask_true.float().to(self.device)
 
                 # encoder - decoder
-                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                outputs, aux_loss = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true)
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
                 
-                loss = criterion((outputs, aux_loss), batch_y)
+                loss = criterion((outputs, aux_loss), batch_y, self.mask)
                 train_loss.append(loss.item())
 
                 train_track(i, epoch, loss)
@@ -198,6 +222,8 @@ class Exp_Main(Exp_Basic):
                 if self.args.lradj == "onecycle":
                     scheduler.step()
 
+                num_updates += 1
+        
             if self.args.lradj != "onecycle":
                 scheduler.step()
 
@@ -219,6 +245,7 @@ class Exp_Main(Exp_Basic):
     def test(self, setting, load_weight=True):
         test_batch_size = self.args.batch_size if self.args.model == 'MIM' else 1
         test_data, test_loader = self._get_data(flag='test', test_batch_size=test_batch_size)
+        self.mask = torch.from_numpy(test_data.mask).to(self.device)
         if load_weight:
             print('loading supervised model weight')
             self.model.load_state_dict(torch.load(os.path.join(self.args.model_save_path + setting, 'checkpoint.pth'), map_location=self.device))
@@ -251,15 +278,23 @@ class Exp_Main(Exp_Basic):
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
                 # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
+                if self.args.model_type == 'rb':
+                    dec_inp = batch_y.to(self.device)
+                else:
+                    dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, ..., :]).float()
+                    dec_inp = torch.cat([batch_y[:, :self.args.label_len, ..., :], dec_inp], dim=1).float().to(self.device)
+
+                # mask_true
+                mask_true = self.curriculum_learning.get_mask_true_on_testing(batch_x.shape[0])
+                if mask_true is not None:
+                    mask_true = mask_true.float().to(self.device)
 
                 # encoder - decoder
-                outputs, _ = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                outputs, _ = self._model_forward(batch_x, batch_x_mark, dec_inp, batch_y_mark, mask_true)
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 outputs = outputs[:, -self.args.pred_len:, ..., f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:].to(self.device)
+                batch_y = batch_y[:, -self.args.pred_len:, ..., f_dim:]
                 outputs = outputs.detach().cpu().numpy()
                 batch_y = batch_y.detach().cpu().numpy()
                 if test_data.scale and self.args.inverse:
@@ -300,6 +335,13 @@ class Exp_Main(Exp_Basic):
         trues = trues.reshape(-1, preds.shape[-4], preds.shape[-3], trues.shape[-2], trues.shape[-1])
         print('test shape:', preds.shape, trues.shape)
 
+        mask = self.mask.detach().cpu().numpy().astype(np.bool_)
+        mask = mask[None, None, :, :, None]
+        print(mask.shape)
+
+        preds *= mask
+        trues *= mask
+
         np.save(results_save_path + 'pred.npy', preds)
         np.save(results_save_path + 'true.npy', trues)
 
@@ -326,15 +368,12 @@ class Exp_Main(Exp_Basic):
         input_mark = torch.randn(1, self.args.seq_len, 3).to(self.device)
         dec_inp = torch.randn(1, self.args.label_len+self.args.pred_len, self.args.height, self.args.width, self.args.dec_in).to(self.device)
         dec_inp_mark = torch.randn(1, self.args.label_len+self.args.pred_len, 3).to(self.device)
-        # trues = torch.randn(1, 30, 96, 64, 14).to(self.device)
-        # extra_input = {'batch_y': trues}
 
-        # mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
-        # if mask_true is not None:
-        #     mask_true = mask_true.float().to(self.device)
-        #     extra_input['mask_true'] = mask_true
+        mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
+        if mask_true is not None:
+            mask_true = mask_true.float().to(self.device)
 
-        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark))
+        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark, mask_true))
 
         flops_1 = f"{flops / 10**9:.3f}G"
         params_1 = f"{params / 10**6:.3f}M"
