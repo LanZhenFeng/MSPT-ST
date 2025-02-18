@@ -47,10 +47,9 @@ class Model(nn.Module):
         for i in range(1, self.num_layers):
             h_t[i], c_t[i] = self.cell_list[i](h_t[i - 1], h_t[i], c_t[i])
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         
-        assert self.cls == 'none' or mask_true is not None, "mask_true is required for RSS and SS"
         mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
 
         x_enc = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)

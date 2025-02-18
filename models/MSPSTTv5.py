@@ -911,7 +911,6 @@ class Model(nn.Module):
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         
-        assert self.cls == 'none' or mask_true is not None, "mask_true is required for RSS and SS"
         mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
 
         x_ts = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)

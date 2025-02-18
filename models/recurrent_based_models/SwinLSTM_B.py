@@ -15,29 +15,22 @@ class Model(nn.Module):
 
     """
 
-    def __init__(self, configs, depths=5, num_heads=4, window_size=4):
+    def __init__(self, configs, window_size=4):
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
         self.pred_len = configs.pred_len
-        self.depths = depths
-        self.num_heads = num_heads
-        self.patch_size = configs.patch_size
-        self.window_size = window_size 
 
         # curriculum learning strategy
         self.cls = configs.curriculum_learning_strategy # RSS, SS or Standard
         curriculum_learning_strategies = ['rss', 'ss', 's']
         assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 's']"
 
-        self.ST = STconvert(img_size=[configs.height, configs.width], patch_size=self.patch_size, in_chans=configs.enc_in, 
-                            embed_dim=configs.d_model, depths=depths,
-                            num_heads=num_heads, window_size=window_size)
+        self.ST = STconvert(img_size=[configs.height, configs.width], patch_size=configs.patch_size, in_chans=configs.enc_in, embed_dim=configs.d_model, depths=configs.e_layers, num_heads=configs.n_heads, window_size=window_size)
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         
-        assert self.cls == 'none' or mask_true is not None, "mask_true is required for RSS and SS"
         mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
 
         x_enc = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)

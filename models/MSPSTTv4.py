@@ -985,7 +985,7 @@ class Model(nn.Module):
 
         return dec_out, balance_loss
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         if self.seq_len >= self.pred_len:
             dec_out, balance_loss = self.forward_core(x_enc, x_mark_enc)
             return dec_out[:,:self.pred_len], balance_loss
