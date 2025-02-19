@@ -555,7 +555,7 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         #     x_item, attn = attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)
         #     xs[i] = x_item
         #     attns.append(attn)
-        xs = [attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
+        xs = [attention_layer(x_item, x_item, x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
         attns = None
 
         # combine
@@ -1148,6 +1148,6 @@ class Model(nn.Module):
             predictions.append(prediction)
             aux_loss.append(balance_loss)
 
-        dec_out = torch.stack(predictions, dim=1)
+        dec_out = torch.cat(predictions, dim=1)
         
         return dec_out, torch.stack(aux_loss).mean()
