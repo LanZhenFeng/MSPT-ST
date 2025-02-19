@@ -1100,7 +1100,7 @@ class Model(nn.Module):
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
         
         # encoding
-        enc_out, _, aux_loss = self.encoder(x_enc)
+        enc_out, _, aux_loss = self.encoder(enc_out)
 
         # prediction
         enc_out = rearrange(enc_out, 'b t h w d -> b h w (t d)')
