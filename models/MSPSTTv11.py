@@ -684,7 +684,7 @@ class WindowAttentionLayer(nn.Module):
             attn_mask = self.get_attn_mask(shifted_x)
         else:
             attn_mask = self.attn_mask
-        attn_windows, attn = self.attention(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, D
+        attn_windows = self.attention(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, D
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size[0], self.window_size[1], D)
@@ -700,7 +700,7 @@ class WindowAttentionLayer(nn.Module):
         # re-arrange
         x = rearrange(x, '(b t) h w d -> b t h w d', b=B, t=T)
 
-        return x, attn
+        return x, None
 
 
 class MultiScalePeriodicSpatialTemporalBlock(nn.Module):
