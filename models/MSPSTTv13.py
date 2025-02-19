@@ -578,7 +578,7 @@ class WindowAttentionLayer(nn.Module):
             dynamic_mask: bool = False
     ):
         super(WindowAttentionLayer, self).__init__()
-        self.attention = WindowAttention(d_model, n_heads, window_size=window_size, shift_size=shift_size, attn_drop=attn_drop, proj_drop=proj_drop)
+        self.attention = WindowAttention(d_model, n_heads, window_size=window_size, attn_drop=attn_drop, proj_drop=proj_drop)
         self.input_resolution = img_size
         self.target_shift_size = to_2tuple(shift_size)
         self.always_partition = always_partition
@@ -758,7 +758,7 @@ class MultiScalePeriodicSpatialTemporalBlock(nn.Module):
 
             self.attention_s_layers.append(
                 WindowAttentionLayer(
-                    dim,
+                    d_model,
                     n_heads=n_heads,
                     img_size=img_size,
                     window_size=window_size,
@@ -770,23 +770,33 @@ class MultiScalePeriodicSpatialTemporalBlock(nn.Module):
                 )
             )
             self.mlp_t_layers.append(Mlp(in_features=dim, hidden_features=dim * 4, act_layer=activation, drop=mlp_drop))
-            self.mlp_s_layers.append(Mlp(in_features=dim, hidden_features=dim * 4, act_layer=activation, drop=mlp_drop))
+            self.mlp_s_layers.append(Mlp(in_features=d_model, hidden_features=d_model * 4, act_layer=activation, drop=mlp_drop))
             self.norm_attn_t_layers.append(nn.LayerNorm(dim))
             self.norm_mlp_t_layers.append(nn.LayerNorm(dim))
-            self.norm_attn_s_layers.append(nn.LayerNorm(dim))
-            self.norm_mlp_s_layers.append(nn.LayerNorm(dim))
+            self.norm_attn_s_layers.append(nn.LayerNorm(d_model))
+            self.norm_mlp_s_layers.append(nn.LayerNorm(d_model))
         
         self.dropout = nn.Dropout(dropout)
         self.pre_norm = pre_norm
 
+    def cv_squared(self, x):
+        eps = 1e-10
+        if x.shape[0] == 1:
+            return torch.tensor([0], device=x.device, dtype=x.dtype)
+        return x.float().var() / (x.float().mean() ** 2 + eps)
+
     def forward_one_branch(self, x, branch_idx, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
+        if x.shape[0] == 0:
+            return x
+
         B, T, H, W, D = x.shape
+        x = rearrange(x, 'b t h w d -> (b h w) t d')
         segment_size = self.segment_sizes[branch_idx]
         padding = segment_size - T % segment_size if T % segment_size != 0 else 0
-        x = F.pad(x, (0, 0, 0, 0, 0, 0, 0, padding), mode='replicate')
+        x = F.pad(x, (0, 0, 0, padding), mode='replicate')
         x = x.unfold(1, segment_size, segment_size)
-        x = rearrange(x, 'b f h w d p -> b f h w (d p)')
+        x = rearrange(x, 'bhw f d p -> bhw f (d p)')
 
         res = x
         if self.pre_norm:
@@ -795,7 +805,7 @@ class MultiScalePeriodicSpatialTemporalBlock(nn.Module):
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_attn_t_layers[branch_idx](x)
-        
+
         res = x
         if self.pre_norm:
             x = self.norm_mlp_t_layers[branch_idx](x)
@@ -803,6 +813,11 @@ class MultiScalePeriodicSpatialTemporalBlock(nn.Module):
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_mlp_t_layers[branch_idx](x)
+
+        x = rearrange(x, '(b h w) f d -> b f h w d', h=H, w=W)
+        # reverse unfold
+        x = rearrange(x, 'b f h w (d p) -> b (f p) h w d', p=segment_size)
+        x = x[:, :T]
 
         res = x
         if self.pre_norm:
@@ -819,10 +834,6 @@ class MultiScalePeriodicSpatialTemporalBlock(nn.Module):
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_mlp_s_layers[branch_idx](x)
-
-        # reverse unfold
-        x = rearrange(x, 'b f h w (d p) -> b (f p) h w d', p=segment_size)
-        x = x[:, :T]
 
         return x
         
