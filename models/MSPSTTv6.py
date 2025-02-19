@@ -16,10 +16,6 @@ def dispatch(inp, gates):
     # get according batch index for each expert
     _batch_index = torch.nonzero(gates)[index_sorted_experts[:, 1], 0]
     _part_sizes = (gates > 0).sum(0).tolist()
-    # check if _part_sizes is all zeros
-    # when all parts are zero, gates are zeros and nans
-    # if sum(_part_sizes) == 0:
-    #     print(f"All zero parts, gates: {gates}")
     # assigns samples to experts whose gate is nonzero
     # expand according to batch index so we can just split by _part_sizes
     inp_exp = inp[_batch_index].squeeze(1)

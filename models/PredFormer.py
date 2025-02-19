@@ -290,7 +290,7 @@ class PatchEmbed(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = nn.LayerNorm(embed_dim)
+        # self.norm = nn.LayerNorm(embed_dim)
         self.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
 
     def forward(self, x):
@@ -299,22 +299,25 @@ class PatchEmbed(nn.Module):
         x = rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.proj(x) # -> [B, T, D, H//P, W//P]
         x = rearrange(x, '(b t) d h w -> b t (h w) d', b=B) # -> [B, T, S, D]
-        x = self.norm(x)
+        # x = self.norm(x)
         return x
 
 class PatchRecovery(nn.Module):
     def __init__(self, d_model, c_out, patch_size, height, width, dropout=0.):
         super(PatchRecovery, self).__init__()
-        self.proj = nn.Linear(d_model, patch_size*patch_size*c_out)
+        # self.proj = nn.Linear(d_model, patch_size*patch_size*c_out)
+        self.proj = nn.ConvTranspose2d(d_model, c_out, kernel_size=patch_size, stride=patch_size)
         self.patch_size = patch_size
         self.height = height
         self.width = width
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = self.proj(self.dropout(x)) # -> [B, T, S, P*P*C]
-        x = rearrange(x, 'b t (h w) c -> b t h w c', h=self.height//self.patch_size, w=self.width//self.patch_size)
-        x = rearrange(x, 'b t h w (p1 p2 c) -> b t (h p1) (w p2) c', p1=self.patch_size, p2=self.patch_size)
+        T = x.shape[1]
+        x = self.dropout(x)
+        x = rearrange(x, 'b t (h w) d -> (b t) d h w', h=self.height//self.patch_size, w=self.width//self.patch_size)
+        x = self.proj(x) # -> [B, T, H, W, C]
+        x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
         return x
 
 
@@ -503,6 +506,19 @@ class Model(nn.Module):
 
         self.patch_recovery = PatchRecovery(configs.d_model, configs.c_out, configs.patch_size, configs.height, configs.width, configs.dropout)
 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=.02)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        if isinstance(m, nn.Conv2d):
+            nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Conv2d) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+
     def forward_core(self, x_enc):
         # x_enc [B, T, H, W, C]
         
@@ -520,7 +536,7 @@ class Model(nn.Module):
 
         return dec_out
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, **kwargs):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true):
         if self.seq_len >= self.pred_len:
             return self.forward_core(x_enc)[:,:self.pred_len], None
         else:

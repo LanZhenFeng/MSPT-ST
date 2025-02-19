@@ -147,9 +147,10 @@ if __name__ == '__main__':
     if args.is_training:
         for ii in range(args.itr):
             # setting record of experiments
-            setting = '{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
+            setting = '{}_{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(
                 args.model_id,
                 args.model_print,
+                args.model_type,
                 args.data,
                 args.features,
                 args.height,
@@ -177,6 +178,10 @@ if __name__ == '__main__':
 
             print('>>>>>>>calculate metrics : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
             exp.cal_metrics(setting)
+
+            print('>>>>>>>get params and flops : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
+            exp.get_paramandflops()
+            torch.cuda.empty_cache()
     else:
         ii = 0
         setting = '{}_{}_{}_{}_ft{}_h{}w{}_ps{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_eb{}_cls{}_{}_{}'.format(

@@ -354,13 +354,10 @@ class Exp_Main(Exp_Basic):
         input_mark = torch.randn(1, self.args.seq_len, 3).to(self.device)
         dec_inp = torch.randn(1, self.args.label_len+self.args.pred_len, self.args.height, self.args.width, self.args.dec_in).to(self.device)
         dec_inp_mark = torch.randn(1, self.args.label_len+self.args.pred_len, 3).to(self.device)
-        # trues = torch.randn(1, 30, 96, 64, 14).to(self.device)
-        # extra_input = {'batch_y': trues}
 
-        # mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
-        # if mask_true is not None:
-        #     mask_true = mask_true.float().to(self.device)
-        #     extra_input['mask_true'] = mask_true
+        mask_true = self.curriculum_learning.get_mask_true_on_testing(input.shape[0])
+        if mask_true is not None:
+            mask_true = mask_true.float().to(self.device)
 
         flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark))
 
