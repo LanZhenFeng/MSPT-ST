@@ -85,11 +85,12 @@ Metrics for evaluation of spatio-temporal forecasting models
 
 def MSE_ST(pred, true, spatial_norm=False):
     diff_sq = (pred - true)**2
-    if not spatial_norm:
-        return np.mean(diff_sq, axis=(0, 1)).sum()
-    else:
-        norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
-        return (np.mean(diff_sq / norm, axis=(0, 1))).sum()
+    return np.mean(diff_sq)
+    # if not spatial_norm:
+    #     return np.mean(diff_sq, axis=(0, 1)).sum()
+    # else:
+    #     norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+    #     return (np.mean(diff_sq / norm, axis=(0, 1))).sum()
 
 def RMSE_ST(pred, true, spatial_norm=False):
     mse = MSE_ST(pred, true, spatial_norm)
@@ -97,11 +98,12 @@ def RMSE_ST(pred, true, spatial_norm=False):
 
 def MAE_ST(pred, true, spatial_norm=False):
     diff_abs = np.abs(pred - true)
-    if not spatial_norm:
-        return np.mean(diff_abs, axis=(0, 1)).sum()
-    else:
-        norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
-        return (np.mean(diff_abs / norm, axis=(0, 1))).sum()
+    return np.mean(diff_abs)
+    # if not spatial_norm:
+    #     return np.mean(diff_abs, axis=(0, 1)).sum()
+    # else:
+    #     norm = pred.shape[-1] * pred.shape[-2] * pred.shape[-3]
+    #     return (np.mean(diff_abs / norm, axis=(0, 1))).sum()
 
 def PSNR(pred, true, min_max_norm=True):
     """Peak Signal-to-Noise Ratio.
@@ -123,7 +125,7 @@ def PSNR_ST(pred, true):
     for i in range(pred.shape[0]):
         for j in range(pred.shape[1]):
             # psnr += PSNR(pred[i, j], true[i, j])
-            psnr += cal_psnr(true[i, j].swapaxes(0, 2), pred[i, j].swapaxes(0, 2), data_range=true[i, j].max() - true[i, j].min())
+            psnr += cal_psnr(true[i, j, :, :, -1], pred[i, j, :, :, -1], data_range=true[i, j, :, :, -1].max() - true[i, j, :, :, -1].min())
     return psnr / (pred.shape[0] * pred.shape[1])
 
 
@@ -132,7 +134,7 @@ def SSIM(pred, true):
     ssim = 0
     for i in range(pred.shape[0]):
         for j in range(pred.shape[1]):
-            ssim += cal_ssim(pred[i, j].swapaxes(0, 2), true[i, j].swapaxes(0, 2), data_range=true[i, j].max() - true[i, j].min(), channel_axis=0)
+            ssim += cal_ssim(pred[i, j, :, :, -1], true[i, j, :, :, -1], data_range=true[i, j, :, :, -1].max() - true[i, j, :, :, -1].min())
     return ssim / (pred.shape[0] * pred.shape[1])
 
 
