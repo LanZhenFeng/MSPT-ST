@@ -887,6 +887,7 @@ class MSPSTTDecoderLayer(nn.Module):
             x = self.norm_attn_self_t(x)
 
         # Multi-head Cross Attention
+        cross = rearrange(cross, 'b t h w d -> (b h w) t d')
         res = x
         if self.pre_norm:
             x = self.norm_attn_cross_t(x)
@@ -930,11 +931,11 @@ class MSPSTTDecoder(nn.Module):
         self.norm = norm_layer
         self.proj = projection
 
-    def forward(self, x, cross, freqs_cis, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, cross, freqs_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
 
         for decoder_layer in self.decoder_layers:
-            x = decoder_layer(x, cross, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)
+            x = decoder_layer(x, cross, freqs_cis, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
         if self.norm is not None:
             x = self.norm(x)
@@ -1175,7 +1176,7 @@ class Model(nn.Module):
 
         self.segment_sizes = self.get_segment_sizes(self.seq_len)
         for segment_size in self.segment_sizes:
-            dim = self.d_model * segment_size // 2
+            dim = self.d_model * (segment_size//2)
             num_segments = self.seq_len // segment_size if self.seq_len % segment_size == 0 else self.seq_len // segment_size + 1
             self.register_buffer(f"freqs_cis_{segment_size}", precompute_freqs_cis(dim, num_segments), persistent=False)
 
@@ -1187,7 +1188,7 @@ class Model(nn.Module):
         print(f"Segment sizes: {segment_sizes}")
         return segment_sizes
 
-    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # embedding
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
         
@@ -1200,6 +1201,10 @@ class Model(nn.Module):
         # train mode 
         if self.training:
             dec_out = self.dec_embedding(x_dec[:, :-1], x_mark_dec[:, :-1])
+            dec_out = self.decoder(dec_out, enc_out, freqs_cis).detach()
+            new_tokens = mask_true * x_dec[:, self.label_len:-1] + (1 - mask_true) * dec_out[:, self.label_len-1:-1]
+            new_tokens = torch.cat([x_dec[:, :self.label_len], new_tokens], dim=1)
+            dec_out = self.dec_embedding(new_tokens, x_mark_dec[:, :-1])
             dec_out = self.decoder(dec_out, enc_out, freqs_cis)
             return dec_out[:, -self.pred_len:], aux_loss
         # eval mode
@@ -1212,4 +1217,4 @@ class Model(nn.Module):
                 predictions.append(dec_out[:, -1:])
                 dec_inp = torch.cat([dec_inp, dec_out[:, -1:]], dim=1)
             predictions = torch.cat(predictions, dim=1)
-            return predictions, None
+            return predictions[:, -self.pred_len:], None

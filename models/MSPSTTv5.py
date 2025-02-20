@@ -911,15 +911,13 @@ class Model(nn.Module):
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
         # x_enc [batch, length, height, width, channel] -> [batch, length, channel, height, width]
         
-        mask_true = rearrange(mask_true, 'b t h w c -> b t c h w')
-
         x_ts = torch.cat((x_enc, x_dec[:, -self.pred_len:]), dim=1)
 
-        x_mark = torch.cat([x_mark_enc, x_mark_dec[:, -self.seq_len:]], dim=1)
+        x_mark = torch.cat([x_mark_enc, x_mark_dec[:, -self.pred_len:]], dim=1)
 
         predictions = []
 
-        init_input = x_ts[:, :self.seq_len]
+        init_input = x_enc
 
         for t in range(self.seq_len - 1, self.seq_len + self.pred_len - 1):
             if t >= self.seq_len:
