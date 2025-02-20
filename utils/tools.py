@@ -187,8 +187,8 @@ class CurriculumLearning:
         self.r_sampling_step_2 = configs.r_sampling_step_2
         self.r_exp_alpha = configs.r_exp_alpha
         # parameters for schedule sampling
-        self.sampling_stop_iter = configs.sampling_stop_iter
-        self.sampling_changing_rate = configs.sampling_changing_rate
+        # self.sampling_stop_iter = configs.sampling_stop_iter
+        # self.sampling_changing_rate = configs.sampling_changing_rate
         self.scheduled_sampling = configs.scheduled_sampling
 
         # special setting for curriculum learning of SwinLSTM
@@ -203,6 +203,10 @@ class CurriculumLearning:
         self.height = configs.height
         self.width = configs.width
         self.C = configs.enc_in
+        self.num_iters = (15097*0.7 - self.seq_len - self.pred_len - 1) // configs.batch_size
+        self.train_epochs = configs.train_epochs
+        self.sampling_stop_iter = self.num_iters * self.train_epochs * 0.3
+        self.sampling_changing_rate = 1.0 / self.sampling_stop_iter
 
         self.ss_eta = 1.0
 
@@ -291,7 +295,6 @@ class CurriculumLearning:
             return torch.from_numpy(mask_true)
         elif self.curriculum_learning_strategy == 'ss':
             mask_true = np.zeros((batch_size, self.pred_len - 1, self.height // self.patch_size, self.width // self.patch_size, self.patch_size ** 2 * self.C))
-            mask_true[:, :self.seq_len - 1] = 1.
             return torch.from_numpy(mask_true)
         else:
             return None

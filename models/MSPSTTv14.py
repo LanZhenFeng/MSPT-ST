@@ -901,7 +901,6 @@ class MSPSTTDecoderLayer(nn.Module):
         res = x
         if self.pre_norm:
             x = self.norm_attn_cross_s(x)
-            cross = self.norm_attn_cross_s(cross)
         x, _ = self.attention_cross_s(x)
         x = res + self.dropout(x)
         if not self.pre_norm:
@@ -959,6 +958,7 @@ class PatchEmbed(nn.Module):
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        # self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
         # x [B, T, H, W, C] -> [B, T, H', W', D]
@@ -966,49 +966,67 @@ class PatchEmbed(nn.Module):
         x = rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.proj(x)
         x = rearrange(x, '(b t) d h w -> b t h w d', t=T)
+        # x = self.norm(x)
         return x
 
 
+# class PatchRecovery(nn.Module):
+#     r""" Tensor to Patch Inflating
+
+#     Args:
+#         in_chans (int): Number of input image channels.
+#         embed_dim (int): Number of linear projection output channels.
+#         input_resolution (tuple[int]): Input resulotion.
+#     """
+
+#     def __init__(
+#             self,
+#             patch_size,
+#             in_chans,
+#             embed_dim,
+#             stride=2,
+#             padding=1,
+#             output_padding=1
+#     ):
+#         super(PatchRecovery, self).__init__()
+
+#         num_layers = np.log2(patch_size).astype(int) - 1
+#         stride = to_2tuple(stride)
+#         padding = to_2tuple(padding)
+#         output_padding = to_2tuple(output_padding)
+
+#         self.Convs = nn.ModuleList()
+#         for i in range(num_layers):
+#             self.Convs.append(nn.Sequential(
+#                 nn.ConvTranspose2d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding),
+#                 nn.GroupNorm(16, embed_dim),
+#                 nn.LeakyReLU(0.2, inplace=True)
+#             ))
+#         self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=in_chans, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding))
+
+#     def forward(self, x):
+#         # x [B, T, H, W, D]
+#         B, T, H, W, D = x.shape
+#         x = rearrange(x, 'b t h w d -> (b t) d h w')
+#         for conv_layer in self.Convs:
+#             x = conv_layer(x)
+#         x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
+#         return x
+
 class PatchRecovery(nn.Module):
-    r""" Tensor to Patch Inflating
-
-    Args:
-        in_chans (int): Number of input image channels.
-        embed_dim (int): Number of linear projection output channels.
-        input_resolution (tuple[int]): Input resulotion.
-    """
-
-    def __init__(
-            self,
-            patch_size,
-            in_chans,
-            embed_dim,
-            stride=2,
-            padding=1,
-            output_padding=1
-    ):
+    r"""Patch Recovery Module [B, T, H, W, D] -> [B, T, H, W, C]"""
+    def __init__(self, patch_size, in_chans, embed_dim):
         super(PatchRecovery, self).__init__()
-
-        num_layers = np.log2(patch_size).astype(int) - 1
-        stride = to_2tuple(stride)
-        padding = to_2tuple(padding)
-        output_padding = to_2tuple(output_padding)
-
-        self.Convs = nn.ModuleList()
-        for i in range(num_layers):
-            self.Convs.append(nn.Sequential(
-                nn.ConvTranspose2d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding),
-                nn.GroupNorm(16, embed_dim),
-                nn.LeakyReLU(0.2, inplace=True)
-            ))
-        self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=in_chans, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding))
+        self.patch_size = patch_size
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+        self.proj = nn.ConvTranspose2d(embed_dim, in_chans, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
         # x [B, T, H, W, D]
         B, T, H, W, D = x.shape
         x = rearrange(x, 'b t h w d -> (b t) d h w')
-        for conv_layer in self.Convs:
-            x = conv_layer(x)
+        x = self.proj(x)
         x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
         return x
 
@@ -1182,6 +1200,18 @@ class Model(nn.Module):
 
         self.register_buffer("freqs_cis", precompute_freqs_cis(self.d_model, max([configs.seq_len, configs.label_len+configs.pred_len])), persistent=False)
 
+    #     self.apply(self._init_weights)
+
+    # def _init_weights(self, m):
+    #     if isinstance(m, nn.Linear):
+    #         nn.init.trunc_normal_(m.weight, std=.02)
+    #         if isinstance(m, nn.Linear) and m.bias is not None:
+    #             nn.init.constant_(m.bias, 0)
+        # if isinstance(m, nn.Conv2d):
+        #     nn.init.xavier_uniform_(m.weight)
+        #     if isinstance(m, nn.Conv2d) and m.bias is not None:
+        #         nn.init.constant_(m.bias, 0)
+
     def get_segment_sizes(self, seq_len):
         peroid_list = 1 / torch.fft.rfftfreq(seq_len)[1:]
         segment_sizes = (peroid_list + 1e-5).int().unique().detach().cpu().numpy()[::-1]
@@ -1200,8 +1230,10 @@ class Model(nn.Module):
         freqs_cis = getattr(self, "freqs_cis")
         # train mode 
         if self.training:
-            dec_out = self.dec_embedding(x_dec[:, :-1], x_mark_dec[:, :-1])
-            dec_out = self.decoder(dec_out, enc_out, freqs_cis).detach()
+            dec_out = None
+            with torch.no_grad():
+                dec_out = self.dec_embedding(x_dec[:, :-1], x_mark_dec[:, :-1]).detach()
+                dec_out = self.decoder(dec_out, enc_out, freqs_cis).detach()
             new_tokens = mask_true * x_dec[:, self.label_len:-1] + (1 - mask_true) * dec_out[:, self.label_len-1:-1]
             new_tokens = torch.cat([x_dec[:, :self.label_len], new_tokens], dim=1)
             dec_out = self.dec_embedding(new_tokens, x_mark_dec[:, :-1])
@@ -1210,9 +1242,9 @@ class Model(nn.Module):
         # eval mode
         else:
             predictions = []
-            dec_inp = x_dec[:, :1]
-            for t in range(self.label_len+self.pred_len-1):
-                dec_out = self.dec_embedding(dec_inp, x_mark_dec[:, :t+1])
+            dec_inp = x_dec[:, :self.label_len]
+            for t in range(self.pred_len):
+                dec_out = self.dec_embedding(dec_inp, x_mark_dec[:, :self.label_len+t])
                 dec_out = self.decoder(dec_out, enc_out, freqs_cis)
                 predictions.append(dec_out[:, -1:])
                 dec_inp = torch.cat([dec_inp, dec_out[:, -1:]], dim=1)
