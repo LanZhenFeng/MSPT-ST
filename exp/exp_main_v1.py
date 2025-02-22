@@ -359,7 +359,7 @@ class Exp_Main(Exp_Basic):
         if mask_true is not None:
             mask_true = mask_true.float().to(self.device)
 
-        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark))
+        flops, params = profile(self.model, inputs=(input, input_mark, dec_inp, dec_inp_mark, mask_true))
 
         flops_1 = f"{flops / 10**9:.3f}G"
         params_1 = f"{params / 10**6:.3f}M"

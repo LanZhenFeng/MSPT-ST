@@ -1186,7 +1186,7 @@ class Model(nn.Module):
                                 ),
                                 input_resolution=(configs.height//self.patch_size, configs.width//self.patch_size),
                                 window_size=window_size,
-                                shift_size=0 if (i % 2 == 0) else window_size//2,
+                                shift_size=window_size//2 if (i % 2 == 0) else 0,
                                 always_partition=False,
                                 dynamic_mask=False,
                             ),

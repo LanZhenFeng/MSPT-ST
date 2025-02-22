@@ -48,10 +48,6 @@ class EarlyStopping:
             self.best_score = score
             self.save_checkpoint(val_loss, model, path)
 
-        if self.cur_epoch == self.watch_epoch:
-            print('Early stopping is watching now.')
-            self.watch_flag = True
-        
         elif score < self.best_score + self.delta:
             if self.cur_epoch == self.watch_epoch:
                 print('Early stopping is watching now.')
