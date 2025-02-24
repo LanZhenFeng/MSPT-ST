@@ -26,10 +26,10 @@ class Model(nn.Module):
         self.stride = stride
         self.layer_norm = layer_norm
 
-       # curriculum learning strategy
-        self.cls = configs.curriculum_learning_strategy # RSS, SS or Standard
-        curriculum_learning_strategies = ['rss', 'ss', 's']
-        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 's']"
+        # curriculum learning strategy
+        self.cls = configs.curriculum_learning_strategy # RSS, SS or None
+        curriculum_learning_strategies = ['rss', 'ss', 'none']
+        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 'none']"
 
         cell_list = []
         self.d_patch = configs.patch_size * configs.patch_size * configs.enc_in

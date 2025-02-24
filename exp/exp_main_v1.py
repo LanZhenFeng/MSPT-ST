@@ -131,7 +131,7 @@ class Exp_Main(Exp_Basic):
         self.results_save_path = os.path.join(self.args.results_save_path, setting)
         self.test_results_save_path = os.path.join(self.args.test_results_save_path, setting)
         
-        early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
+        early_stopping = EarlyStopping(watch_epoch=self.args.watch_epoch, patience=self.args.patience, verbose=True)
 
         model_optim = self._select_optimizer()
 

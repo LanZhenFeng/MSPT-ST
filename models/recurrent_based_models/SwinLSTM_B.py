@@ -22,9 +22,9 @@ class Model(nn.Module):
         self.pred_len = configs.pred_len
 
         # curriculum learning strategy
-        self.cls = configs.curriculum_learning_strategy # RSS, SS or Standard
-        curriculum_learning_strategies = ['rss', 'ss', 's']
-        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 's']"
+        self.cls = configs.curriculum_learning_strategy # RSS, SS or None
+        curriculum_learning_strategies = ['rss', 'ss', 'none']
+        assert self.cls in curriculum_learning_strategies, "curriculum_learning_strategy must be one of ['rss', 'ss', 'none']"
 
         self.ST = STconvert(img_size=[configs.height, configs.width], patch_size=configs.patch_size, in_chans=configs.enc_in, embed_dim=configs.d_model, depths=configs.e_layers, num_heads=configs.n_heads, window_size=window_size)
 
