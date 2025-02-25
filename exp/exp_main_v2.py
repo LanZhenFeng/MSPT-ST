@@ -354,6 +354,7 @@ class Exp_Main(Exp_Basic):
         print('mse:{}, mae:{}, rmse:{}, pnsr:{}, ssim:{}'.format(mse, mae, rmse, pnsr, ssim))
         f = open("result_sstp_st_forecast.txt", 'a')
         f.write(setting + "  \n")
+        f.write(self.args + "  \n")
         f.write('mse:{}, mae:{}, rmse:{}, pnsr:{}, ssim:{}'.format(mse, mae, rmse, pnsr, ssim))
         f.write('\n')
         f.write('\n')

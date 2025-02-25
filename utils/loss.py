@@ -2,6 +2,32 @@ import torch
 import torch.nn as nn
 
 
+class TimeAccumulatedMSELoss(nn.Module):
+    def __init__(self, auxiliary_loss_weight=0., accumulate_weight=0.1):
+        super().__init__()
+        self.mse_loss = nn.MSELoss()
+        self.auxiliary_loss_weight = auxiliary_loss_weight
+        self.accumulate_weight = accumulate_weight
+    
+    def forward(self, input, target):
+        # input [batch, length, height, width, channel] or ([batch, length, channel, height, width], auxiliary_loss)
+        # target [batch, length, height, width, channel]
+        if isinstance(input, tuple):
+            input, auxiliary_loss = input
+
+        loss = (input - target) ** 2
+        loss = loss.mean(dim=(2, 3, 4))
+
+        for i in range(1, loss.size(1)):
+            loss[:, i] += self.accumulate_weight * loss[:, i - 1]
+
+        loss = loss.mean()
+
+        if auxiliary_loss is None:
+            return self.accumulated_loss
+        else:
+            return self.accumulated_loss + self.auxiliary_loss_weight * auxiliary_loss
+
 class MSELoss(nn.Module):
     def __init__(self, auxiliary_loss_weight=0.):
         super().__init__()

@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import List, Tuple
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -7,9 +7,8 @@ import numpy as np
 from math import ceil, log
 from einops import rearrange
 from timm.models.swin_transformer import WindowAttention, window_partition, window_reverse
-from timm.models.vision_transformer import Attention as VariableAttention
 from timm.layers import Mlp, LayerNorm2d, use_fused_attn, to_2tuple
-from layers.Embed import PositionalEmbedding, TemporalEmbedding, TimeFeatureEmbedding
+from layers.Embed import TemporalEmbedding, TimeFeatureEmbedding
 
 def dispatch(inp, gates):
     # sort experts
@@ -51,28 +50,32 @@ def combine(expert_out, gates, multiply_by_gates=True):
 class FullAttention(nn.Module):
     def __init__(
             self,
-            d_model: int,
+            d_model: int = 512,
             n_heads: int = 8,
             attn_drop: float = 0.,
             is_causal: bool = False,
             output_attention: bool = False
     ):
         super().__init__()
-        assert d_model % n_heads == 0, 'd_model should be divisible by n_heads'
+        assert d_model % n_heads == 0, 'dim should be divisible by num_heads'
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.fused_attn = use_fused_attn()
+        self.attn_drop = nn.Dropout(attn_drop)
         self.is_causal = is_causal
         self.output_attention = output_attention
-        self.scale = self.head_dim ** -0.5
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.fused_attn = use_fused_attn()
 
     def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
         B, H, L, E = queries.shape
         _, H, S, D = values.shape
 
         if self.fused_attn and not self.output_attention:
-            return F.scaled_dot_product_attention(queries, keys, values, attn_mask,dropout_p=self.attn_drop.p if self.training else 0., is_causal=self.is_causal), None
+            return F.scaled_dot_product_attention(
+                queries, keys, values, attn_mask,
+                dropout_p=self.attn_drop.p if self.training else 0.,
+                is_causal=self.is_causal,
+            ), None
         else:
             attn_bias = torch.zeros(L, S, dtype=queries.dtype, device=queries.device)
             if self.is_causal:
@@ -96,6 +99,50 @@ class FullAttention(nn.Module):
                 return attn_weight @ values, attn_weight
             else:
                 return attn_weight @ values, None
+
+
+class TemporalAttentionLayer(nn.Module):
+    def __init__(
+            self,
+            attention: nn.Module = FullAttention,
+            d_model: int = 512,
+            n_heads: int = 8,
+            qkv_bias: bool = False,
+            qk_norm: bool = False,
+            proj_bias: bool = True, 
+            proj_drop: float = 0.
+    ):
+        super(TemporalAttentionLayer, self).__init__()
+        self.inner_attention = attention
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
+        self.k_proj= nn.Linear(d_model, d_model, bias=qkv_bias)
+        self.v_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
+        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.o_proj = nn.Linear(d_model, d_model, bias=proj_bias)
+        self.o_proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
+        # x [B, T, H, W, D]
+        B, T, H, W, D = queries.shape
+
+        # qkv projection and reshape
+        queries, keys, values = self.q_proj(queries), self.k_proj(keys), self.v_proj(values)
+        queries, keys, values = map(lambda x: rearrange(x, 'b t h w (n d) -> (b h w) t n d', n=self.n_heads), (queries, keys, values))
+        queries, keys = self.q_norm(queries), self.k_norm(keys)
+
+        # attention
+        x, attn = self.inner_attention(queries, keys, values, attn_mask, tau=tau, delta=delta)
+
+        # reshape and projection
+        x = rearrange(x, 'b n t d -> b t (n d)')
+        x = self.o_proj(x)
+        x = self.o_proj_drop(x)
+        x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
+
+        return x, attn
 
 
 class Gate(nn.Module):
@@ -127,7 +174,7 @@ class Gate(nn.Module):
                 nn.Sequential(
                     nn.Conv2d(in_channels=in_dim, out_channels=out_dim, kernel_size=2, stride=2), 
                     LayerNorm2d(out_dim),
-                    nn.ReLU(inplace=True)
+                    nn.LeakyReLU(inplace=True),
                 )
             )
 
@@ -156,7 +203,6 @@ class Gate(nn.Module):
     def get_segment_sizes(self, seq_len):
         peroid_list = 1 / torch.fft.rfftfreq(seq_len)[1:]
         segment_sizes = (peroid_list + 1e-5).int().unique().detach().cpu().numpy()[::-1]
-        # print(f"Segment sizes: {segment_sizes}")
         return segment_sizes
 
     def _gates_to_load(self, gates):
@@ -221,22 +267,18 @@ class Gate(nn.Module):
 
 class PeriodicAttentionLayer(nn.Module):
     def __init__(
-            self,
-            attention: nn.Module,
-            seq_len: int,
-            segment_size: int,
-            d_model: int,
+            self, 
+            attention: nn.Module = FullAttention,
+            segment_size: int = 2,
+            d_model: int = 512,
             n_heads: int = 8,
-            learned_pe: bool = False,
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            proj_bias: bool = True,
-            proj_drop: float = 0.,
-            pos_drop: float = 0.,
+            qkv_bias: bool = False, 
+            qk_norm: bool = False, 
+            proj_bias: bool = True, 
+            proj_drop: float = 0.
     ):
         super(PeriodicAttentionLayer, self).__init__()
         assert segment_size*d_model % n_heads == 0, 'd_model should be divisible by n_heads'
-        self.seq_len = seq_len
         self.segment_size = segment_size
         self.inner_attention = attention
         self.n_heads = n_heads
@@ -252,27 +294,14 @@ class PeriodicAttentionLayer(nn.Module):
         self.o_proj = nn.Linear(self.hid_dim, self.out_dim, bias=proj_bias)
         self.o_proj_drop = nn.Dropout(proj_drop)
 
-        self.learned_pe = learned_pe
-        num_segments = seq_len // segment_size if seq_len % segment_size == 0 else seq_len // segment_size + 1
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_segments, self.in_dim)) if learned_pe else PositionalEmbedding(self.in_dim)
-        self.pos_drop = nn.Dropout(pos_drop)
-
-        # weight initialization
-        if learned_pe:
-            nn.init.trunc_normal_(self.pos_embed, std=.02)
-
     def transform_input(self, x):
         T = x.shape[1]
         x = rearrange(x, 'b t h w d -> (b h w) t d')
         padding_len = self.segment_size - T % self.segment_size if T % self.segment_size != 0 else 0
-        x = F.pad(x, (0, 0, 0, padding_len), mode='replicate')
+        # x = F.pad(x, (0, 0, 0, padding_len), mode='replicate')
+        x = F.pad(x, (0, 0, 0, padding_len), mode='constant', value=0)
         x = x.unfold(1, self.segment_size, self.segment_size)
         x = rearrange(x, 'b n d p -> b n (p d)')
-        # add position embedding
-        if self.learned_pe:
-            x = self.pos_drop(x + self.pos_embed)
-        else:
-            x = self.pos_drop(x + self.pos_embed(x))
         return x
 
     def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
@@ -287,188 +316,17 @@ class PeriodicAttentionLayer(nn.Module):
         values = self.transform_input(values)
 
         # qkv projection
-        queries = self.q_proj(queries)
-        keys = self.k_proj(keys)
-        values = self.v_proj(values)
-        queries = rearrange(queries, 'b n (h d) -> b h n d', h=self.n_heads)
-        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.n_heads)
-        values = rearrange(values, 'b n (h d) -> b h n d', h=self.n_heads)
+        queries, keys, values = self.q_proj(queries), self.k_proj(keys), self.v_proj(values)
+        queries, keys, values = map(lambda x: rearrange(x, 'b n (h d) -> b h n d', h=self.n_heads), (queries, keys, values))
         queries, keys = self.q_norm(queries), self.k_norm(keys)
 
-        x, attn = self.inner_attention(
-            queries,
-            keys,
-            values,
-            attn_mask,
-            tau=tau,
-            delta=delta
-        )
+        # attention
+        x, attn = self.inner_attention(queries, keys, values, attn_mask, tau=tau, delta=delta)
 
+        # projection and reshape
         x = rearrange(x, 'b h n d -> b n (h d)')
         x = self.o_proj(x)
         x = self.o_proj_drop(x)
-        x = rearrange(x, 'b n (p d) -> b (n p) d', p=self.segment_size)[:,:T]
-        x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
-
-        return x, attn
-
-# 生成旋转矩阵
-def precompute_freqs_cis(dim: int, seq_len: int, theta: float = 10000.0):
-    """
-    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
-
-    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
-    and the end index 'end'. The 'theta' parameter scales the frequencies.
-    The returned tensor contains complex values in complex64 data type.
-
-    Args:
-        dim (int): Dimension of the frequency tensor.
-        end (int): End index for precomputing frequencies.
-        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
-
-    Returns:
-        torch.Tensor: Precomputed frequency tensor with complex exponentials.
-    """
-    # 计算词向量之后，两两分组，每组对应的旋转角度
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    # end 一般指句子的最大长度
-    t = torch.arange(seq_len, device=freqs.device)  # type: ignore
-    # 计算 t和 freqs 的外积
-
-    # seq_len * (dim // 2)
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-
-    # torch.polar 
-    # seq_len * (dim // 2)
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
-    """
-    Reshape frequency tensor for broadcasting it with another tensor.
-
-    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
-    for the purpose of broadcasting the frequency tensor during element-wise operations.
-
-    Args:
-        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
-        x (torch.Tensor): Target tensor for broadcasting compatibility.
-
-    Returns:
-        torch.Tensor: Reshaped frequency tensor.
-
-    Raises:
-        AssertionError: If the frequency tensor doesn't match the expected shape.
-        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
-    """
-    ndim = x.ndim
-    assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-    
-def apply_rotary_emb(
-    xq: torch.Tensor,
-    xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply rotary embeddings to input tensors using the given frequency tensor.
-
-    This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
-    frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
-    is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
-    returned as real tensors.
-
-    Args:
-        xq (torch.Tensor): Query tensor to apply rotary embeddings.
-        xk (torch.Tensor): Key tensor to apply rotary embeddings.
-        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
-    """
-    xq_len = xq.shape[1]
-    xk_len = xk.shape[1]
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis_q = reshape_for_broadcast(freqs_cis[:xq_len], xq_)
-    freqs_cis_k = reshape_for_broadcast(freqs_cis[:xk_len], xk_)
-    # freqs_cis [1, seq_len, dim // 2]
-    xq_out = torch.view_as_real(xq_ * freqs_cis_q).flatten(2)
-    xk_out = torch.view_as_real(xk_ * freqs_cis_k).flatten(2)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
-
-
-class PeriodicAttentionLayer_RoPE(nn.Module):
-    def __init__(
-            self,
-            attention: nn.Module,
-            segment_size: int,
-            d_model: int,
-            n_heads: int = 8,
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            proj_bias: bool = True,
-            proj_drop: float = 0.,
-    ):
-        super(PeriodicAttentionLayer_RoPE, self).__init__()
-        assert segment_size*d_model % n_heads == 0, 'd_model should be divisible by n_heads'
-        self.segment_size = segment_size
-        self.inner_attention = attention
-        self.n_heads = n_heads
-        self.in_dim = d_model * segment_size
-        self.hid_dim = d_model * (segment_size//2)
-        self.out_dim = d_model * segment_size
-        self.head_dim = self.hid_dim // n_heads
-        self.q_proj = nn.Linear(self.in_dim, self.hid_dim, bias=qkv_bias)
-        self.k_proj= nn.Linear(self.in_dim, self.hid_dim, bias=qkv_bias)
-        self.v_proj = nn.Linear(self.in_dim, self.hid_dim, bias=qkv_bias)
-        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.o_proj = nn.Linear(self.hid_dim, self.out_dim, bias=proj_bias)
-        self.o_proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x, freqs_cis, attn_mask=None, tau=None, delta=None):
-        # x [B, T, H, W, D]
-        if x.shape[0] == 0:
-            return x, None
-
-        B, T, H, W, D = x.shape
-        # rearrange and segment
-        x = rearrange(x, 'b t h w d -> (b h w) t d')
-        padding_len = self.segment_size - T % self.segment_size if T % self.segment_size != 0 else 0
-        x = F.pad(x, (0, 0, 0, padding_len), mode='replicate')
-        x = x.unfold(1, self.segment_size, self.segment_size)
-        x = rearrange(x, 'b n d p -> b n (p d)')
-
-        # qkv projection
-        queries = self.q_proj(x)
-        keys = self.k_proj(x)
-        values = self.v_proj(x)
-        # qk norm
-        queries, keys = self.q_norm(queries), self.k_norm(keys)
-        # rotary embedding
-        queries, keys = apply_rotary_emb(queries, keys, freqs_cis)
-
-        queries = rearrange(queries, 'b n (h d) -> b h n d', h=self.n_heads)
-        keys = rearrange(keys, 'b n (h d) -> b h n d', h=self.n_heads)
-        values = rearrange(values, 'b n (h d) -> b h n d', h=self.n_heads)
-
-        x, attn = self.inner_attention(
-            queries,
-            keys,
-            values,
-            attn_mask,
-            tau=tau,
-            delta=delta
-        )
-
-        # output projection
-        x = rearrange(x, 'b h n d -> b n (h d)')
-        x = self.o_proj(x)
-        x = self.o_proj_drop(x)
-        # reshape back
         x = rearrange(x, 'b n (p d) -> b (n p) d', p=self.segment_size)[:,:T]
         x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
 
@@ -476,29 +334,16 @@ class PeriodicAttentionLayer_RoPE(nn.Module):
 
 
 class MultiScalePeriodicAttentionLayer(nn.Module):
-    def __init__(
-            self,
-            attention: nn.Module,
-            seq_len: int,
-            top_k: int,
-            d_model: int,
-            n_heads: int = 8,
-            img_size: Tuple[int, int] = (32, 32),
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            proj_bias: bool = True,
-            proj_drop: float = 0.,
-            gate_drop: float = 0.
-    ):
+    def __init__(self, attention, seq_len, top_k, img_size, d_model, n_heads, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0., fuse_drop=0.):
         super(MultiScalePeriodicAttentionLayer, self).__init__()
         assert d_model % n_heads == 0, 'd_model should be divisible by n_heads'
-        self.gate_layer = Gate(seq_len, top_k, d_model, img_size, gate_drop)
+        self.gate_layer = Gate(seq_len=seq_len, top_k=top_k, d_model=d_model, img_size=img_size, fuse_drop=fuse_drop)
         self.segment_sizes = self.gate_layer.segment_sizes
 
         self.attention_layers = nn.ModuleList()
         for segment_size in self.segment_sizes:
             self.attention_layers.append(
-                PeriodicAttentionLayer_RoPE(
+                PeriodicAttentionLayer(
                     attention,
                     segment_size,
                     d_model,
@@ -509,27 +354,16 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
                     proj_drop=proj_drop,
                 )
             )
-    
-    def cv_squared(self, x):
-        eps = 1e-10
-        if x.shape[0] == 1:
-            return torch.tensor([0], device=x.device, dtype=x.dtype)
-        return x.float().var() / (x.float().mean() ** 2 + eps)
 
-    def forward(self, x, freqs_ciss, attn_mask=None, tau=None, delta=None, loss_coef=1e-2):
-        # x [B, T, C, H, W, D]
+    def forward(self, x, attn_mask=None, tau=None, delta=None):
+        # queries, keys, values [B, T, H, W, D]
         B, T, H, W, D = x.shape
 
         # gating
-        gates, load = self.gate_layer(x, training=self.training) # [B, Ps]
+        gates = self.gate_layer(x, training=self.training) # [B, Ps]
 
         # dispatch
         xs = dispatch(x, gates) # Ps * [B, T, H, W, D]
-
-        # calculate balance loss
-        importance = gates.sum(0)
-        balance_loss = self.cv_squared(importance) + self.cv_squared(load)
-        balance_loss *= loss_coef
         
         # multi-branch attention
         # attns = []
@@ -537,16 +371,17 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         #     x_item, attn = attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)
         #     xs[i] = x_item
         #     attns.append(attn)
-        xs = [attention_layer(x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, freqs_cis, attention_layer in zip(xs, freqs_ciss, self.attention_layers)]
+        xs = [attention_layer(x_item, x_item, x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
         attns = None
 
         # combine
         x = combine(xs, gates)
 
-        return x, attns, balance_loss
+        return x, attns
 
 
 class WindowAttentionLayer(nn.Module):
+    r"""Window Attention Layer of Swin Transformer. """
     def __init__(
             self,
             d_model: int,
@@ -638,10 +473,9 @@ class WindowAttentionLayer(nn.Module):
         )
 
     def forward(self, x):
-        # x [B, T, H, W, D]
         B, T, H, W, D = x.shape
-        
-        # re-arrange
+
+        # reshape
         x = rearrange(x, 'b t h w d -> (b t) h w d')
 
         # cyclic shift
@@ -679,7 +513,7 @@ class WindowAttentionLayer(nn.Module):
         else:
             x = shifted_x
 
-        # re-arrange
+        # reshape back
         x = rearrange(x, '(b t) h w d -> b t h w d', b=B, t=T)
 
         return x, None
@@ -689,18 +523,18 @@ class MSPSTTEncoderLayer(nn.Module):
     r"""
 
     Encoder layer for Multi-Scale Periodic Spatial-Temporal Transformer.
-    Through swapping the order of the spatial attention (attention_s) and the temporal attention (attention_t), we can get two different versions of the encoder layer.
 
     """
     def __init__(
             self,
-            attention_t: nn.Module,
-            attention_s: nn.Module,
+            attention_t,
+            attention_s,
             d_model: int,
             d_ff: int = None,
             dropout: float = 0.,
             activation: str = "relu",
-            pre_norm: bool = False
+            pre_norm: bool = False,
+            parallelize: bool = False
     ):
         super(MSPSTTEncoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
@@ -709,37 +543,71 @@ class MSPSTTEncoderLayer(nn.Module):
         self.attention_t = attention_t
         self.attention_s = attention_s
         self.mlp_t = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
-        # self.mlp_s = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
+        self.mlp_s = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
         self.norm_attn_t = nn.LayerNorm(d_model)
         self.norm_mlp_t = nn.LayerNorm(d_model)
         self.norm_attn_s = nn.LayerNorm(d_model)
-        # self.norm_mlp_s = nn.LayerNorm(d_model)
+        self.norm_mlp_s = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-        self.pre_norm = pre_norm
-
-    def forward(self, x, freqs_ciss, attn_mask=None, tau=None, delta=None):
+        self.concat = nn.Linear(2*d_model, d_model) if parallelize else None
         
+        self.pre_norm = pre_norm # pre-norm or post-norm
+        self.parallelize = parallelize # parallelize spatial attention and temporal attention
+
+    def forward_parallel(self, x, attn_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
-            x = self.norm_attn_s(x)
-        x, attn_s = self.attention_s(x)
-        x = res + self.dropout(x)
+            x_t = self.norm_attn_t(x)
+        else:
+            x_t = x
+        x_t, attn_t = self.attention_t(x_t)
+        x_t = res + self.dropout(x_t)
         if not self.pre_norm:
-            x = self.norm_attn_s(x)
+            x_t = self.norm_attn_t(x_t)
 
-        # res = x
-        # if self.pre_norm:
-        #     x = self.norm_mlp_s(x)
-        # x = self.mlp_s(x)
-        # x = res + self.dropout(x)
-        # if not self.pre_norm:
-        #     x = self.norm_mlp_s(x)
+        res = x_t
+        if self.pre_norm:
+            x_t = self.norm_mlp_t(x_t)
+        x_t = self.mlp_t(x_t)
+        x_t = res + self.dropout(x_t)
+        if not self.pre_norm:
+            x_t = self.norm_mlp_t(x_t)
 
+        res = x
+        if self.pre_norm:
+            x_s = self.norm_attn_s(x)
+        else:
+            x_s = x
+        x_s, attn_s = self.attention_s(x_s)
+        x_s = res + self.dropout(x_s)
+        if not self.pre_norm:
+            x_s = self.norm_attn_s(x_s)
+        
+        res = x_s
+        if self.pre_norm:
+            x_s = self.norm_mlp_s(x_s)
+        x_s = self.mlp_s(x_s)
+        x_s = res + self.dropout(x_s)
+        if not self.pre_norm:
+            x_s = self.norm_mlp_s(x_s)
+
+        ## combine
+        # add
+        # x = (x_t + x_s) / 2
+        # multiply
+        # x = x_t * x_s
+        # linear
+        # x = self.linear(torch.cat([x_t, x_s], dim=-1))
+        x = self.concat(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+
+        return x, (attn_t, attn_s)
+
+    def forward_serial(self, x, attn_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x = self.norm_attn_t(x)
-        x, attn_t, balance_loss = self.attention_t(x, freqs_ciss)
+        x, attn_t = self.attention_t(x)
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_attn_t(x)
@@ -752,161 +620,153 @@ class MSPSTTEncoderLayer(nn.Module):
         if not self.pre_norm:
             x = self.norm_mlp_t(x)
 
-        return x, (attn_t, attn_s), balance_loss
+        res = x
+        if self.pre_norm:
+            x = self.norm_attn_s(x)
+        x, attn_s = self.attention_s(x)
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_attn_s(x)
+
+        res = x
+        if self.pre_norm:
+            x = self.norm_mlp_s(x)
+        x = self.mlp_s(x)
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_mlp_s(x)
+
+        return x, (attn_t, attn_s)
+
+    def forward(self, x, attn_mask=None, tau=None, delta=None):
+        # x [B, T, H, W, D]
+        # parallel
+        if self.parallelize:
+            return self.forward_parallel(x, attn_mask=attn_mask, tau=tau, delta=delta)
+
+        # serial
+        else:
+            return self.forward_serial(x, attn_mask=attn_mask, tau=tau, delta=delta)
 
 
 class MSPSTTEncoder(nn.Module):
+    r"""
+    
+    Encoder for Multi-Scale Periodic Spatial-Temporal Transformer.
+    
+    """
     def __init__(
             self, 
-            encoder_layers: list,
+            encoder_layers: List[nn.Module],
             norm_layer: nn.Module = None
     ):
         super(MSPSTTEncoder, self).__init__()
         self.encoder_layers = nn.ModuleList(encoder_layers)
         self.norm = norm_layer
 
-    def forward(self, x, freqs_ciss, attn_mask=None, tau=None, delta=None):
-        # x [B, T, H, W, D]
-        aux_loss = 0.
+    def forward(self, x, attn_mask=None, tau=None, delta=None):
         attns = []
-
         for encoder_layer in self.encoder_layers:
-            x, attn, balance_loss = encoder_layer(x, freqs_ciss, attn_mask=attn_mask, tau=tau, delta=delta)
+            x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
             attns.append(attn)
-            aux_loss += balance_loss
 
         if self.norm is not None:
             x = self.norm(x)
 
-        return x, attns, aux_loss
-
-
-class TemporalAttentionLayer(nn.Module):
-    def __init__(self, attention, d_model, n_heads, qkv_bias=False, qk_norm=False, proj_bias=True, proj_drop=0.):
-        super(TemporalAttentionLayer, self).__init__()
-        self.inner_attention = attention
-        self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.q_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
-        self.k_proj= nn.Linear(d_model, d_model, bias=qkv_bias)
-        self.v_proj = nn.Linear(d_model, d_model, bias=qkv_bias)
-        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
-        self.o_proj = nn.Linear(d_model, d_model, bias=proj_bias)
-        self.o_proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, queries, keys, values, freqs_cis, attn_mask=None, tau=None, delta=None):
-        # x [B, T, D]
-
-        B, L, D = queries.shape
-        _, S, _ = keys.shape
-
-        # qkv projection
-        queries = self.q_proj(queries)
-        keys = self.k_proj(keys)
-        values = self.v_proj(values)
-        queries, keys = self.q_norm(queries), self.k_norm(keys)
-
-        queries, keys = apply_rotary_emb(queries, keys, freqs_cis)
-
-        # rearrange and segment
-        queries = rearrange(queries, 'b t (n d) -> b n t d', n=self.n_heads)
-        keys = rearrange(keys, 'b t (n d) -> b n t d', n=self.n_heads)
-        values = rearrange(values, 'b t (n d) -> b n t d', n=self.n_heads)
-
-        x, _ = self.inner_attention(
-            queries,
-            keys,
-            values,
-            attn_mask,
-            tau=tau,
-            delta=delta
-        )
-
-        x = rearrange(x, 'b n t d -> b t (n d)')
-        x = self.o_proj(x)
-        x = self.o_proj_drop(x)
-
-        return x
+        return x, attns
 
 
 class MSPSTTDecoderLayer(nn.Module):
     r"""
-
+    
     Decoder layer for Multi-Scale Periodic Spatial-Temporal Transformer.
-    Through swapping the order of the spatial attention (attention_s) and the temporal attention (attention_t), we can get two different versions of the decoder layer.
-
+    
     """
     def __init__(
-            self,
-            attention_t,
-            attention_s,
-            attention_c,
-            attention_cs,
+            self, 
+            self_attention_t,
+            self_attention_s,
+            cross_attention_t,
+            cross_attention_s,
             d_model: int,
             d_ff: int = None,
             dropout: float = 0.,
             activation: str = "relu",
-            pre_norm: bool = False
+            pre_norm: bool = False,
+            parallelize: bool = False
     ):
         super(MSPSTTDecoderLayer, self).__init__()
         d_ff = d_ff or 4 * d_model
         activation = nn.ReLU if activation == "relu" else nn.GELU
         
-        self.attention_self_t = attention_t
-        self.attention_self_s = attention_s
-        self.attention_cross_t = attention_c
-        self.attention_cross_s = attention_cs
+        self.self_attention_t = self_attention_t
+        self.self_attention_s = self_attention_s
+        self.cross_attention_t = cross_attention_t
+        self.cross_attention_s = cross_attention_s
         self.mlp = Mlp(in_features=d_model, hidden_features=d_ff, act_layer=activation, drop=dropout)
-        self.norm_attn_self_t = nn.LayerNorm(d_model)
-        self.norm_attn_self_s = nn.LayerNorm(d_model)
-        self.norm_attn_cross_t = nn.LayerNorm(d_model)
-        self.norm_attn_cross_s = nn.LayerNorm(d_model)
+        self.norm_sa_t = nn.LayerNorm(d_model)
+        self.norm_sa_s = nn.LayerNorm(d_model)
+        self.norm_ca_t = nn.LayerNorm(d_model)
+        self.norm_ca_s = nn.LayerNorm(d_model)
+        self.norm_cross = nn.LayerNorm(d_model)
         self.norm_mlp = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.pre_norm = pre_norm
 
-    def forward(self, x, cross, freqs_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
-        # Masked Multi-head Self-Attention
-        res = x
-        if self.pre_norm:
-            x = self.norm_attn_self_s(x)
-        x, _ = self.attention_self_s(x)
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm_attn_self_s(x)
+        self.concat_s = nn.Linear(2*d_model, d_model) if parallelize else None
+        self.concat_c = nn.Linear(2*d_model, d_model) if parallelize else None
         
-        H, W = x.shape[2], x.shape[3]
-        x = rearrange(x, 'b t h w d -> (b h w) t d')
-        res = x
-        if self.pre_norm:
-            x = self.norm_attn_self_t(x)
-        x = self.attention_self_t(x, x, x, freqs_cis)
-        x = res + self.dropout(x)
-        if not self.pre_norm:
-            x = self.norm_attn_self_t(x)
+        self.pre_norm = pre_norm # pre-norm or post-norm
+        self.parallelize = parallelize # parallelize spatial attention and temporal attention
 
-        # Multi-head Cross Attention
-        cross = rearrange(cross, 'b t h w d -> (b h w) t d')
+    def forward_parallel(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
-            x = self.norm_attn_cross_t(x)
-            cross = self.norm_attn_cross_t(cross)
-        x = self.attention_cross_t(x, cross, cross, freqs_cis)
-        x = res + self.dropout(x)
+            x_t = self.norm_sa_t(x)
+        else:
+            x_t = x
+        x_t, self_attn_t = self.self_attention_t(x_t, x_t, x_t) # Temporal Self-Attention
+        x_t = res + self.dropout(x_t)
         if not self.pre_norm:
-            x = self.norm_attn_cross_t(x)
-        x = rearrange(x, '(b h w) t d -> b t h w d', h=H, w=W)
+            x_t = self.norm_sa_t(x_t)
 
         res = x
         if self.pre_norm:
-            x = self.norm_attn_cross_s(x)
-        x, _ = self.attention_cross_s(x)
-        x = res + self.dropout(x)
+            x_s = self.norm_sa_s(x)
+        else:
+            x_s = x
+        x_s, self_attn_s = self.self_attention_s(x_s)
+        x_s = res + self.dropout(x_s)
         if not self.pre_norm:
-            x = self.norm_attn_cross_s(x)
+            x_s = self.norm_sa_s(x_s)
         
-        # MLP
+        ## combine
+        # add
+        # x = (x_t + x_s) / 2
+        # multiply
+        # x = x_t * x_s
+        # linear
+        # x = self.self_reduction(torch.cat([x_t, x_s], dim=-1))
+        x = self.concat_s(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+
+        res = x
+        if self.pre_norm:
+            x_t = self.norm_ca_t(x)
+            cross = self.norm_cross(cross)
+        x_t, cross_attn_t = self.cross_attention_t(x_t, cross, cross) # Temporal Cross-Attention
+        x_t = res + self.dropout(x_t)
+        if not self.pre_norm:
+            x_t = self.norm_ca_t(x_t)
+
+        res = x
+        if self.pre_norm:
+            x_s = self.norm_ca_s(x)
+        x_s, cross_attn_s = self.cross_attention_s(x_s)
+        x_s = res + self.dropout(x_s)
+        if not self.pre_norm:
+            x_s = self.norm_ca_s(x_s)
+
+        x = self.concat_c(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+
         res = x
         if self.pre_norm:
             x = self.norm_mlp(x)
@@ -917,48 +777,97 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
+    def forward_serial(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
+        res = x
+        if self.pre_norm:
+            x = self.norm_sa_t(x)
+        x, self_attn_t = self.self_attention_t(x, x, x) # Temporal Self-Attention
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_sa_t(x)
+
+        res = x
+        if self.pre_norm:
+            x = self.norm_sa_s(x)
+        x, self_attn_s = self.self_attention_s(x)
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_sa_s(x)
+
+        res = x
+        if self.pre_norm:
+            x = self.norm_ca_t(x)
+            cross = self.norm_cross(cross)
+        x, cross_attn_t = self.cross_attention_t(x, cross, cross) # Temporal Cross-Attention
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_ca_t(x)
+
+        res = x
+        if self.pre_norm:
+            x = self.norm_ca_s(x)
+        x, cross_attn_s = self.cross_attention_s(x)
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_ca_s(x)
+
+        res = x
+        if self.pre_norm:
+            x = self.norm_mlp(x)
+        x = self.mlp(x)
+        x = res + self.dropout(x)
+        if not self.pre_norm:
+            x = self.norm_mlp(x)
+
+        return x
+
+    def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
+        # x [B, T, H, W, D]
+        # parallel
+        if self.parallelize:
+            return self.forward_parallel(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+
+        # serial
+        else:
+            return self.forward_serial(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+
 
 class MSPSTTDecoder(nn.Module):
+    r"""
+    
+    Decoder for Multi-Scale Periodic Spatial-Temporal Transformer.
+    
+    """
     def __init__(
             self, 
-            decoder_layers: list,
+            decoder_layers: List[nn.Module],
             norm_layer: nn.Module = None,
-            projection: nn.Module = None
-    ):
+            projection: nn.Module = None,
+        ):
         super(MSPSTTDecoder, self).__init__()
         self.decoder_layers = nn.ModuleList(decoder_layers)
         self.norm = norm_layer
-        self.proj = projection
+        self.projection = projection
 
-    def forward(self, x, cross, freqs_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
-        # x [B, T, H, W, D]
-
+    def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         for decoder_layer in self.decoder_layers:
-            x = decoder_layer(x, cross, freqs_cis, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+            x = decoder_layer(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
         if self.norm is not None:
             x = self.norm(x)
 
-        if self.proj is not None:
-            x = self.proj(x)
-
+        if self.projection is not None:
+            x = self.projection(x)
         return x
 
 
 class PatchEmbed(nn.Module):
-    def __init__(
-            self,
-            img_size: Tuple[int, int],
-            patch_size: int,
-            in_chans: int,
-            embed_dim: int,
-    ):
+    def __init__(self, img_size, patch_size, in_chans, embed_dim):
         super(PatchEmbed, self).__init__()
         self.img_size = img_size
         self.patch_size = patch_size
         self.embed_dim = embed_dim
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        # self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
         # x [B, T, H, W, C] -> [B, T, H', W', D]
@@ -966,61 +875,30 @@ class PatchEmbed(nn.Module):
         x = rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.proj(x)
         x = rearrange(x, '(b t) d h w -> b t h w d', t=T)
-        # x = self.norm(x)
         return x
 
 
-# class PatchRecovery(nn.Module):
-#     r""" Tensor to Patch Inflating
+class PatchRecovery_OneStep(nn.Module):
+    r"""Patch recovery module. 
+    
+    Args:
+        patch_size (int): Size of the patch.
+        embed_dim (int): Number of linear projection output channels.
+        out_chans (int): Number of output channels.
+    """
 
-#     Args:
-#         in_chans (int): Number of input image channels.
-#         embed_dim (int): Number of linear projection output channels.
-#         input_resolution (tuple[int]): Input resulotion.
-#     """
-
-#     def __init__(
-#             self,
-#             patch_size,
-#             in_chans,
-#             embed_dim,
-#             stride=2,
-#             padding=1,
-#             output_padding=1
-#     ):
-#         super(PatchRecovery, self).__init__()
-
-#         num_layers = np.log2(patch_size).astype(int) - 1
-#         stride = to_2tuple(stride)
-#         padding = to_2tuple(padding)
-#         output_padding = to_2tuple(output_padding)
-
-#         self.Convs = nn.ModuleList()
-#         for i in range(num_layers):
-#             self.Convs.append(nn.Sequential(
-#                 nn.ConvTranspose2d(in_channels=embed_dim, out_channels=embed_dim, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding),
-#                 nn.GroupNorm(16, embed_dim),
-#                 nn.LeakyReLU(0.2, inplace=True)
-#             ))
-#         self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=in_chans, kernel_size=(3, 3), stride=stride, padding=padding, output_padding=output_padding))
-
-#     def forward(self, x):
-#         # x [B, T, H, W, D]
-#         B, T, H, W, D = x.shape
-#         x = rearrange(x, 'b t h w d -> (b t) d h w')
-#         for conv_layer in self.Convs:
-#             x = conv_layer(x)
-#         x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
-#         return x
-
-class PatchRecovery(nn.Module):
-    r"""Patch Recovery Module [B, T, H, W, D] -> [B, T, H, W, C]"""
-    def __init__(self, patch_size, in_chans, embed_dim):
-        super(PatchRecovery, self).__init__()
+    def __init__(
+            self, 
+            patch_size: int = 16,
+            embed_dim: int = 512,
+            out_chans: int = 3,
+    ):
+        super(PatchRecovery_OneStep, self).__init__()
         self.patch_size = patch_size
-        self.in_chans = in_chans
         self.embed_dim = embed_dim
-        self.proj = nn.ConvTranspose2d(embed_dim, in_chans, kernel_size=patch_size, stride=patch_size)
+        self.out_chans = out_chans
+        self.proj = nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=patch_size, stride=patch_size)
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor=patch_size)
 
     def forward(self, x):
         # x [B, T, H, W, D]
@@ -1031,7 +909,137 @@ class PatchRecovery(nn.Module):
         return x
 
 
-class DataEmbedding_wo_pos(nn.Module):
+class PatchRecovery_StepByStep(nn.Module):
+    r""" Patch recovery step by step.
+
+    Args:
+        patch_size (int): Size of the patch.
+        embed_dim (int): Number of linear projection output channels.
+        out_chans (int): Number of output channels.
+        kernel_size (int): Size of the kernel.
+        stride (int): Stride of the transposed convolution.
+        padding (int): Padding of the transposed convolution.
+    """
+
+    def __init__(
+            self,
+            patch_size: int = 16,
+            embed_dim: int = 512,
+            out_chans: int = 3,
+            kernel_size: int = 3,
+            stride: int = 2,
+            padding: int = 1,
+    ):
+        super(PatchRecovery_StepByStep, self).__init__()
+
+        num_layers = np.log2(patch_size).astype(int) - 1
+        kernel_size = to_2tuple(kernel_size)
+        stride = to_2tuple(stride)
+        padding = to_2tuple(padding)
+        output_padding = to_2tuple(output_padding)
+
+        self.Convs = nn.ModuleList()
+        for i in range(num_layers):
+            self.Convs.append(nn.Sequential(
+                nn.ConvTranspose2d(in_channels=embed_dim,out_channels=embed_dim, kernel_size=kernel_size, stride=stride, padding=padding),
+                LayerNorm2d(embed_dim),
+                nn.SiLU(inplace=True)
+            ))
+        self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=kernel_size, stride=stride, padding=padding))
+
+    def forward(self, x):
+        # x [B, T, H, W, D]
+        B, T, H, W, D = x.shape
+        x = rearrange(x, 'b t h w d -> (b t) d h w')
+        for conv_layer in self.Convs:
+            x = conv_layer(x)
+        x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
+        return x
+
+
+class PatchRecovery_PixelShuffle(nn.Module):
+    r""" Patch recovery with pixel shuffle.
+
+    Args:
+        patch_size (int): Size of the patch.
+        embed_dim (int): Number of linear projection output channels.
+        out_chans (int): Number of output channels.
+    """
+
+    def __init__(
+            self,
+            patch_size: int = 16,
+            embed_dim: int = 512,
+            out_chans: int = 3,
+    ):
+        super(PatchRecovery_PixelShuffle, self).__init__()
+        self.patch_size = patch_size
+        self.embed_dim = embed_dim
+        self.out_chans = out_chans
+        self.proj = nn.Conv2d(in_channels=embed_dim, out_channels=out_chans * patch_size ** 2, kernel_size=1)
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor=patch_size)
+
+    def forward(self, x):
+        # x [B, T, H, W, D]
+        B, T, H, W, D = x.shape
+        x = rearrange(x, 'b t h w d -> (b t) d h w')
+        x = self.proj(x)
+        x = self.pixel_shuffle(x)
+        x = rearrange(x, '(b t) c h w -> b t h w c', t=T)
+        return x
+
+
+class PositionalEmbedding(nn.Module):
+
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model).float()
+        pe.requires_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, d_model, 2).float() * -(log(10000.0) / d_model)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0).unsqueeze(-2).unsqueeze(-2)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return self.pe[:, :x.size(1)]
+
+
+class PositionalEmbedding2D(torch.nn.Module):
+    def __init__(self, d_model, height, width):
+        super(PositionalEmbedding2D, self).__init__()
+        self.d_model = d_model
+
+        if d_model % 4 != 0:
+            raise ValueError("Cannot use sin/cos positional encoding with odd dimension (got dim={:d})".format(d_model))
+
+        pe_2d = torch.zeros(height, width, d_model)
+        pe_2d.require_grad = False
+        # Each dimension use half of d_model
+        d_model = int(d_model / 2)
+        div_term = torch.exp(torch.arange(0., d_model, 2) * -(log(10000.0) / d_model))  # [d_model/2]
+
+        pos_w = torch.arange(0., width).unsqueeze(1)  # [W, 1]
+        pos_h = torch.arange(0., height).unsqueeze(1)  # [H, 1]
+
+        pe_2d[:, :, 0:d_model:2] = torch.sin(pos_w * div_term).unsqueeze(0).repeat(height, 1, 1)
+        pe_2d[:, :, 1:d_model:2] = torch.cos(pos_w * div_term).unsqueeze(0).repeat(height, 1, 1)
+        pe_2d[:, :, d_model::2] = torch.sin(pos_h * div_term).unsqueeze(1).repeat(1, width, 1)
+        pe_2d[:, :, d_model + 1::2] = torch.cos(pos_h * div_term).unsqueeze(1).repeat(1, width, 1)
+
+        pe_2d = pe_2d.unsqueeze(0).unsqueeze(0)
+        self.register_buffer('pe_2d', pe_2d)
+
+    def forward(self, x):
+        return self.pe_2d[:, :, :x.size(2), :x.size(3), :]
+
+
+class DataEmbedding(nn.Module):
     def __init__(
             self,
             img_size: tuple,
@@ -1042,46 +1050,45 @@ class DataEmbedding_wo_pos(nn.Module):
             freq: str = 'h',
             dropout: float = 0.1
     ):
-        super(DataEmbedding_wo_pos, self).__init__()
+        super(DataEmbedding, self).__init__()
 
         self.value_embedding = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=d_model)
-        self.position_embedding = PositionalEmbedding(d_model)
+        self.temporal_position_embedding = PositionalEmbedding(d_model=d_model)
+        self.spatial_position_embedding = PositionalEmbedding2D(d_model=d_model, height=img_size[0]//patch_size, width=img_size[1]//patch_size)
         self.temporal_embedding = TemporalEmbedding(d_model=d_model, embed_type=embed_type, freq=freq) if embed_type != 'timeF' else TimeFeatureEmbedding(d_model=d_model, embed_type=embed_type, freq=freq)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, x_mark):
         if x_mark is None:
-            x = self.value_embedding(x)
+            x = self.value_embedding(x) + self.temporal_position_embedding(x) + self.spatial_position_embedding(x)
         else:
-            x = self.value_embedding(x) + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
+            x = self.value_embedding(x) + self.temporal_position_embedding(x) + self.spatial_position_embedding(x) + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
         return self.dropout(x)
 
 
 class Model(nn.Module):
     r'''
     
-    Multi-Scale Periodic Spatio-Temporal Transformer ------ AR Architecture
+    Multi-Scale Periodic Spatio-Temporal Transformer ------ Informer Encoder-Decoder Architecture
     
     '''
     def __init__(self, configs, window_size=4): 
         super(Model, self).__init__()
         self.configs = configs
         self.seq_len = configs.seq_len
-        self.label_len = configs.label_len
         self.pred_len = configs.pred_len
         self.e_layers = configs.e_layers
-        self.d_layers = configs.d_layers
         self.d_model = configs.d_model
+
         self.height = configs.height
         self.width = configs.width
-        self.img_size = tuple([configs.height, configs.width])
         self.patch_size = configs.patch_size
         assert self.height % self.patch_size == 0, "Height must be divisible by patch size"
         assert self.width % self.patch_size == 0, "Width must be divisible by patch size"
 
-        self.enc_embedding = DataEmbedding_wo_pos(img_size=self.img_size, patch_size=configs.patch_size, in_chans=configs.enc_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
+        self.enc_embedding = DataEmbedding(img_size=(configs.height, configs.width), patch_size=configs.patch_size, in_chans=configs.enc_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
 
-        self.dec_embedding = DataEmbedding_wo_pos(img_size=self.img_size, patch_size=configs.patch_size, in_chans=configs.dec_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
+        self.dec_embedding = DataEmbedding(img_size=(configs.height, configs.width),patch_size=configs.patch_size, in_chans=configs.dec_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
 
         self.encoder = MSPSTTEncoder(
                     [
@@ -1096,21 +1103,21 @@ class Model(nn.Module):
                                 ),
                                 seq_len=configs.seq_len,
                                 top_k=configs.top_k,
+                                img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
-                                img_size=(configs.height//configs.patch_size, configs.width//configs.patch_size),
                                 qkv_bias=True,
                                 qk_norm=False,
                                 proj_bias=True,
                                 proj_drop=configs.dropout,
-                                gate_drop=configs.dropout,
+                                fuse_drop=configs.dropout,
                             ),
                             WindowAttentionLayer(
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
-                                img_size=(configs.height//configs.patch_size, configs.width//configs.patch_size),
+                                img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                 window_size=window_size,
-                                shift_size=0 if (i % 2 == 0) else window_size // 2,
+                                shift_size=0 if (i % 2 == 0) else window_size//2,
                                 attn_drop=configs.dropout,
                                 proj_drop=configs.dropout,
                                 always_partition=False,
@@ -1121,7 +1128,9 @@ class Model(nn.Module):
                             dropout=configs.dropout,
                             activation=configs.activation,
                             pre_norm=configs.pre_norm,
-                        ) for i in range(configs.e_layers)
+                            parallelize=configs.is_parallel,
+                        )
+                        for i in range(configs.e_layers)
                     ],
                     norm_layer=nn.LayerNorm(configs.d_model)
                 )
@@ -1147,9 +1156,9 @@ class Model(nn.Module):
                             WindowAttentionLayer(
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
-                                img_size=(configs.height//configs.patch_size, configs.width//configs.patch_size),
+                                img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                 window_size=window_size,
-                                shift_size=0 if (i % 2 == 0) else window_size // 2,
+                                shift_size=0 if (i % 2 == 0) else window_size//2,
                                 attn_drop=configs.dropout,
                                 proj_drop=configs.dropout,
                                 always_partition=False,
@@ -1173,9 +1182,9 @@ class Model(nn.Module):
                             WindowAttentionLayer(
                                 d_model=configs.d_model,
                                 n_heads=configs.n_heads,
-                                img_size=(configs.height//configs.patch_size, configs.width//configs.patch_size),
+                                img_size=(configs.height//self.patch_size, configs.width//self.patch_size),
                                 window_size=window_size,
-                                shift_size=window_size // 2 if (i % 2 == 0) else 0,
+                                shift_size=0 if (i % 2 == 0) else window_size//2,
                                 attn_drop=configs.dropout,
                                 proj_drop=configs.dropout,
                                 always_partition=False,
@@ -1186,67 +1195,21 @@ class Model(nn.Module):
                             dropout=configs.dropout,
                             activation=configs.activation,
                             pre_norm=configs.pre_norm,
-                        ) for i in range(configs.d_layers)
+                            parallelize=configs.is_parallel,
+                        )
+                        for i in range(configs.d_layers)
                     ],
                     norm_layer=nn.LayerNorm(configs.d_model),
-                    projection=PatchRecovery(configs.patch_size, configs.dec_in, configs.d_model)
+                    projection=PatchRecovery_OneStep(self.patch_size, configs.c_out, configs.d_model)
                 )
 
-        self.segment_sizes = self.get_segment_sizes(self.seq_len)
-        for segment_size in self.segment_sizes:
-            dim = self.d_model * (segment_size//2)
-            num_segments = self.seq_len // segment_size if self.seq_len % segment_size == 0 else self.seq_len // segment_size + 1
-            self.register_buffer(f"freqs_cis_{segment_size}", precompute_freqs_cis(dim, num_segments), persistent=False)
-
-        self.register_buffer("freqs_cis", precompute_freqs_cis(self.d_model, max([configs.seq_len, configs.label_len+configs.pred_len])), persistent=False)
-
-    #     self.apply(self._init_weights)
-
-    # def _init_weights(self, m):
-    #     if isinstance(m, nn.Linear):
-    #         nn.init.trunc_normal_(m.weight, std=.02)
-    #         if isinstance(m, nn.Linear) and m.bias is not None:
-    #             nn.init.constant_(m.bias, 0)
-        # if isinstance(m, nn.Conv2d):
-        #     nn.init.xavier_uniform_(m.weight)
-        #     if isinstance(m, nn.Conv2d) and m.bias is not None:
-        #         nn.init.constant_(m.bias, 0)
-
-    def get_segment_sizes(self, seq_len):
-        peroid_list = 1 / torch.fft.rfftfreq(seq_len)[1:]
-        segment_sizes = (peroid_list + 1e-5).int().unique().detach().cpu().numpy()[::-1]
-        print(f"Segment sizes: {segment_sizes}")
-        return segment_sizes
-
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
+        # x_enc [B, T, H, W, C]
         # embedding
-        enc_out = self.enc_embedding(x_enc, x_mark_enc)
-        
-        # encoding
-        freqs_ciss = [getattr(self, f"freqs_cis_{segment_size}") for segment_size in self.segment_sizes]
-        enc_out, _, aux_loss = self.encoder(enc_out, freqs_ciss)
-
-        # decoding
-        freqs_cis = getattr(self, "freqs_cis")
-        # train mode 
-        if self.training:
-            dec_out = None
-            with torch.no_grad():
-                dec_out = self.dec_embedding(x_dec[:, :-1], x_mark_dec[:, :-1]).detach()
-                dec_out = self.decoder(dec_out, enc_out, freqs_cis).detach()
-            new_tokens = mask_true * x_dec[:, self.label_len:-1] + (1 - mask_true) * dec_out[:, self.label_len-1:-1]
-            new_tokens = torch.cat([x_dec[:, :self.label_len], new_tokens], dim=1)
-            dec_out = self.dec_embedding(new_tokens, x_mark_dec[:, :-1])
-            dec_out = self.decoder(dec_out, enc_out, freqs_cis)
-            return dec_out[:, -self.pred_len:], aux_loss
-        # eval mode
-        else:
-            predictions = []
-            dec_inp = x_dec[:, :self.label_len]
-            for t in range(self.pred_len):
-                dec_out = self.dec_embedding(dec_inp, x_mark_dec[:, :self.label_len+t])
-                dec_out = self.decoder(dec_out, enc_out, freqs_cis)
-                predictions.append(dec_out[:, -1:])
-                dec_inp = torch.cat([dec_inp, dec_out[:, -1:]], dim=1)
-            predictions = torch.cat(predictions, dim=1)
-            return predictions[:, -self.pred_len:], None
+        enc_out = self.enc_embedding(x_enc, x_mark_enc) # -> [B, T, H', W', D]
+        dec_out = self.dec_embedding(x_dec, x_mark_dec) # -> [B, S, H', W', D]
+        # encoder
+        enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
+        # decoder
+        dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
+        return dec_out, None
