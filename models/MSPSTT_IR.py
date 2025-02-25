@@ -1256,7 +1256,7 @@ class Model(nn.Module):
                         for i in range(configs.d_layers)
                     ],
                     norm_layer=nn.LayerNorm(configs.d_model),
-                    projection=PatchRecovery_OneStep(self.patch_size, configs.c_out, configs.d_model)
+                    projection=PatchRecovery_OneStep(patch_size=self.patch_size, embed_dim=configs.d_model, out_chans=configs.c_out)
                 )
 
         # rotary position encoding for encoder
