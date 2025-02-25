@@ -47,6 +47,94 @@ def combine(expert_out, gates, multiply_by_gates=True):
     return combined.log()
 
 
+# 生成旋转矩阵
+def precompute_freqs_cis(dim: int, seq_len: int, theta: float = 10000.0):
+    """
+    Precompute the frequency tensor for complex exponentials (cis) with given dimensions.
+
+    This function calculates a frequency tensor with complex exponentials using the given dimension 'dim'
+    and the end index 'end'. The 'theta' parameter scales the frequencies.
+    The returned tensor contains complex values in complex64 data type.
+
+    Args:
+        dim (int): Dimension of the frequency tensor.
+        end (int): End index for precomputing frequencies.
+        theta (float, optional): Scaling factor for frequency computation. Defaults to 10000.0.
+
+    Returns:
+        torch.Tensor: Precomputed frequency tensor with complex exponentials.
+    """
+    # 计算词向量之后，两两分组，每组对应的旋转角度
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    # end 一般指句子的最大长度
+    t = torch.arange(seq_len, device=freqs.device)  # type: ignore
+    # 计算 t和 freqs 的外积
+
+    # seq_len * (dim // 2)
+    freqs = torch.outer(t, freqs).float()  # type: ignore
+
+    # torch.polar 
+    # seq_len * (dim // 2)
+    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
+    return freqs_cis
+
+def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+    """
+    Reshape frequency tensor for broadcasting it with another tensor.
+
+    This function reshapes the frequency tensor to have the same shape as the target tensor 'x'
+    for the purpose of broadcasting the frequency tensor during element-wise operations.
+
+    Args:
+        freqs_cis (torch.Tensor): Frequency tensor to be reshaped.
+        x (torch.Tensor): Target tensor for broadcasting compatibility.
+
+    Returns:
+        torch.Tensor: Reshaped frequency tensor.
+
+    Raises:
+        AssertionError: If the frequency tensor doesn't match the expected shape.
+        AssertionError: If the target tensor 'x' doesn't have the expected number of dimensions.
+    """
+    ndim = x.ndim
+    assert 0 <= 1 < ndim
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    return freqs_cis.view(*shape)
+    
+def apply_rotary_emb(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Apply rotary embeddings to input tensors using the given frequency tensor.
+
+    This function applies rotary embeddings to the given query 'xq' and key 'xk' tensors using the provided
+    frequency tensor 'freqs_cis'. The input tensors are reshaped as complex numbers, and the frequency tensor
+    is reshaped for broadcasting compatibility. The resulting tensors contain rotary embeddings and are
+    returned as real tensors.
+
+    Args:
+        xq (torch.Tensor): Query tensor to apply rotary embeddings.
+        xk (torch.Tensor): Key tensor to apply rotary embeddings.
+        freqs_cis (torch.Tensor): Precomputed frequency tensor for complex exponentials.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+    """
+    xq_len = xq.shape[1]
+    xk_len = xk.shape[1]
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    freqs_cis_q = reshape_for_broadcast(freqs_cis[:xq_len], xq_)
+    freqs_cis_k = reshape_for_broadcast(freqs_cis[:xk_len], xk_)
+    # freqs_cis [1, seq_len, dim // 2]
+    xq_out = torch.view_as_real(xq_ * freqs_cis_q).flatten(2)
+    xk_out = torch.view_as_real(xk_ * freqs_cis_k).flatten(2)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
 class FullAttention(nn.Module):
     def __init__(
             self,
@@ -260,7 +348,7 @@ class PeriodicAttentionLayer(nn.Module):
         x = rearrange(x, 'b n d p -> b n (p d)')
         return x
 
-    def forward(self, queries, keys, values, attn_mask=None, tau=None, delta=None):
+    def forward(self, queries, keys, values, freqs_cis, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
         if queries.shape[0] == 0:
             return queries, None
@@ -273,6 +361,8 @@ class PeriodicAttentionLayer(nn.Module):
 
         # qkv projection
         queries, keys, values = self.q_proj(queries), self.k_proj(keys), self.v_proj(values)
+        # rotary embedding
+        queries, keys = apply_rotary_emb(queries, keys, freqs_cis)
         queries, keys, values = map(lambda x: rearrange(x, 'b n (h d) -> b h n d', h=self.n_heads), (queries, keys, values))
         queries, keys = self.q_norm(queries), self.k_norm(keys)
 
@@ -310,14 +400,14 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
                     proj_drop=proj_drop,
                 )
             )
-
+    
     def cv_squared(self, x):
         eps = 1e-10
         if x.shape[0] == 1:
             return torch.tensor([0], device=x.device, dtype=x.dtype)
         return x.float().var() / (x.float().mean() ** 2 + eps)
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None, loss_coef=1e-2):
+    def forward(self, x, freqs_cis_list, attn_mask=None, tau=None, delta=None, loss_coef=1e-2):
         # queries, keys, values [B, T, H, W, D]
         B, T, H, W, D = x.shape
 
@@ -334,11 +424,11 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         
         # multi-branch attention
         # attns = []
-        # for i, (x_item, attention_layer) in enumerate(zip(xs, self.attention_layers)):
-        #     x_item, attn = attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)
+        # for i, (x_item, freqs_cis, attention_layer) in enumerate(zip(xs, freqs_cis_list, self.attention_layers)):
+        #     x_item, attn = attention_layer(x_item, x_item, x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)
         #     xs[i] = x_item
         #     attns.append(attn)
-        xs = [attention_layer(x_item, x_item, x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
+        xs = [attention_layer(x_item, x_item, x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, freqs_cis, attention_layer in zip(xs, freqs_cis_list, self.attention_layers)]
         attns = None
 
         # combine
@@ -522,13 +612,13 @@ class MSPSTTEncoderLayer(nn.Module):
         self.pre_norm = pre_norm # pre-norm or post-norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
 
-    def forward_parallel(self, x, attn_mask=None, tau=None, delta=None):
+    def forward_parallel(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x_t = self.norm_attn_t(x)
         else:
             x_t = x
-        x_t, attn_t, balance_loss = self.attention_t(x_t)
+        x_t, attn_t, balance_loss = self.attention_t(x_t, freq_cis_list)
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
             x_t = self.norm_attn_t(x_t)
@@ -566,15 +656,15 @@ class MSPSTTEncoderLayer(nn.Module):
         # x = x_t * x_s
         # linear
         # x = self.linear(torch.cat([x_t, x_s], dim=-1))
-        x = self.concat(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 *x_s)], dim=-1))
+        x = self.concat(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 * x_s)], dim=-1))
 
         return x, (attn_t, attn_s), balance_loss
 
-    def forward_serial(self, x, attn_mask=None, tau=None, delta=None):
+    def forward_serial(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x = self.norm_attn_t(x)
-        x, attn_t, balance_loss = self.attention_t(x)
+        x, attn_t, balance_loss = self.attention_t(x, freq_cis_list)
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_attn_t(x)
@@ -605,15 +695,15 @@ class MSPSTTEncoderLayer(nn.Module):
 
         return x, (attn_t, attn_s), balance_loss
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
         # parallel
         if self.parallelize:
-            return self.forward_parallel(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_parallel(x, freq_cis_list, attn_mask=attn_mask, tau=tau, delta=delta)
 
         # serial
         else:
-            return self.forward_serial(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_serial(x, freq_cis_list, attn_mask=attn_mask, tau=tau, delta=delta)
 
 
 class MSPSTTEncoder(nn.Module):
@@ -631,11 +721,11 @@ class MSPSTTEncoder(nn.Module):
         self.encoder_layers = nn.ModuleList(encoder_layers)
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         attns = []
         balance_loss = 0.
         for encoder_layer in self.encoder_layers:
-            x, attn, aux_loss = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x, attn, aux_loss = encoder_layer(x, freq_cis_list, attn_mask=attn_mask, tau=tau, delta=delta)
             attns.append(attn)
             balance_loss += aux_loss
 
@@ -682,6 +772,7 @@ class PatchRecovery_OneStep(nn.Module):
         self.embed_dim = embed_dim
         self.out_chans = out_chans
         self.proj = nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=patch_size, stride=patch_size)
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor=patch_size)
 
     def forward(self, x):
         # x [B, T, H, W, D]
@@ -772,57 +863,7 @@ class PatchRecovery_PixelShuffle(nn.Module):
         return x
 
 
-class PositionalEmbedding(nn.Module):
-
-    def __init__(self, d_model, max_len=5000):
-        super(PositionalEmbedding, self).__init__()
-        # Compute the positional encodings once in log space.
-        pe = torch.zeros(max_len, d_model).float()
-        pe.requires_grad = False
-
-        position = torch.arange(0, max_len).float().unsqueeze(1)
-        div_term = (torch.arange(0, d_model, 2).float() * -(log(10000.0) / d_model)).exp()
-
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-
-        pe = pe.unsqueeze(0).unsqueeze(-2).unsqueeze(-2)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return self.pe[:, :x.size(1)]
-
-
-class PositionalEmbedding2D(torch.nn.Module):
-    def __init__(self, d_model, height, width):
-        super(PositionalEmbedding2D, self).__init__()
-        self.d_model = d_model
-
-        if d_model % 4 != 0:
-            raise ValueError("Cannot use sin/cos positional encoding with odd dimension (got dim={:d})".format(d_model))
-
-        pe_2d = torch.zeros(height, width, d_model)
-        pe_2d.require_grad = False
-        # Each dimension use half of d_model
-        d_model = int(d_model / 2)
-        div_term = torch.exp(torch.arange(0., d_model, 2) * -(log(10000.0) / d_model))  # [d_model/2]
-
-        pos_w = torch.arange(0., width).unsqueeze(1)  # [W, 1]
-        pos_h = torch.arange(0., height).unsqueeze(1)  # [H, 1]
-
-        pe_2d[:, :, 0:d_model:2] = torch.sin(pos_w * div_term).unsqueeze(0).repeat(height, 1, 1)
-        pe_2d[:, :, 1:d_model:2] = torch.cos(pos_w * div_term).unsqueeze(0).repeat(height, 1, 1)
-        pe_2d[:, :, d_model::2] = torch.sin(pos_h * div_term).unsqueeze(1).repeat(1, width, 1)
-        pe_2d[:, :, d_model + 1::2] = torch.cos(pos_h * div_term).unsqueeze(1).repeat(1, width, 1)
-
-        pe_2d = pe_2d.unsqueeze(0).unsqueeze(0)
-        self.register_buffer('pe_2d', pe_2d)
-
-    def forward(self, x):
-        return self.pe_2d[:, :, :x.size(2), :x.size(3), :]
-
-
-class DataEmbedding(nn.Module):
+class DataEmbedding_wo_pos(nn.Module):
     def __init__(
             self,
             img_size: tuple,
@@ -833,19 +874,17 @@ class DataEmbedding(nn.Module):
             freq: str = 'h',
             dropout: float = 0.1
     ):
-        super(DataEmbedding, self).__init__()
+        super(DataEmbedding_wo_pos, self).__init__()
 
         self.value_embedding = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=d_model)
-        self.temporal_position_embedding = PositionalEmbedding(d_model=d_model)
-        self.spatial_position_embedding = PositionalEmbedding2D(d_model=d_model, height=img_size[0]//patch_size, width=img_size[1]//patch_size)
         self.temporal_embedding = TemporalEmbedding(d_model=d_model, embed_type=embed_type, freq=freq) if embed_type != 'timeF' else TimeFeatureEmbedding(d_model=d_model, embed_type=embed_type, freq=freq)
         self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, x, x_mark):
         if x_mark is None:
-            x = self.value_embedding(x) + self.temporal_position_embedding(x) + self.spatial_position_embedding(x)
+            x = self.value_embedding(x)
         else:
-            x = self.value_embedding(x) + self.temporal_position_embedding(x) + self.spatial_position_embedding(x) + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
+            x = self.value_embedding(x) + self.temporal_embedding(x_mark).unsqueeze(-2).unsqueeze(-2)
         return self.dropout(x)
 
 
@@ -871,7 +910,7 @@ class Model(nn.Module):
 
         assert self.pred_len % self.seq_len == 0, "Prediction length must be divisible by sequence length"
 
-        self.enc_embedding = DataEmbedding(img_size=(configs.height, configs.width), patch_size=configs.patch_size, in_chans=configs.enc_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
+        self.enc_embedding = DataEmbedding_wo_pos(img_size=(configs.height, configs.width), patch_size=configs.patch_size, in_chans=configs.enc_in, d_model=configs.d_model, embed_type=configs.embed, freq=configs.freq, dropout=configs.dropout)
 
         self.encoder = MSPSTTEncoder(
                     [
@@ -920,14 +959,29 @@ class Model(nn.Module):
 
         self.projection=PatchRecovery_OneStep(patch_size=self.patch_size, embed_dim=configs.d_model, out_chans=configs.c_out)
 
+        # rotary position encoding for encoder
+        self.segment_sizes = self.get_segment_sizes(self.seq_len)
+        for segment_size in self.segment_sizes:
+            dim = self.d_model * (segment_size//2)
+            num_segments = self.seq_len // segment_size if self.seq_len % segment_size == 0 else self.seq_len // segment_size + 1
+            self.register_buffer(f"freqs_cis_{segment_size}", precompute_freqs_cis(dim, num_segments), persistent=False)
+
+    def get_segment_sizes(self, seq_len):
+        peroid_list = 1 / torch.fft.rfftfreq(seq_len)[1:]
+        segment_sizes = (peroid_list + 1e-5).int().unique().detach().cpu().numpy()[::-1]
+        print(f"Segment sizes: {segment_sizes}")
+        return segment_sizes
+
     def forward_one_step(self, x_enc, x_mark_enc):
         # x_enc [B, T, H, W, C]
         # embedding
-        enc_out = self.enc_embedding(x_enc, x_mark_enc)
+        enc_out = self.enc_embedding(x_enc, x_mark_enc) # -> [B, T, H', W', D]
         # encoder
-        enc_out, _, balance_loss = self.encoder(enc_out)
+        freqs_cis_list = [getattr(self, f"freqs_cis_{segment_size}") for segment_size in self.segment_sizes]
+        enc_out, _, balance_loss = self.encoder(enc_out, freqs_cis_list) # -> [B, T, H', W', D]
         # head
         dec_out = self.projection(enc_out)
+        
         return dec_out, balance_loss
 
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, mask_true=None):
