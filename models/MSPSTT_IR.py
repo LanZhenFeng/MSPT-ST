@@ -707,7 +707,7 @@ class MSPSTTEncoderLayer(nn.Module):
         # x = self.linear(torch.cat([x_t, x_s], dim=-1))
         x = self.concat(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
 
-        return x, (attn_t, attn_s)
+        return x, (attn_t, attn_s), balance_loss
 
     def forward_serial(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         res = x
@@ -742,7 +742,7 @@ class MSPSTTEncoderLayer(nn.Module):
         if not self.pre_norm:
             x = self.norm_mlp_s(x)
 
-        return x, (attn_t, attn_s)
+        return x, (attn_t, attn_s), balance_loss
 
     def forward(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
