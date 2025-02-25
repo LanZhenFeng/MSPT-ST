@@ -449,30 +449,41 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
                     proj_drop=proj_drop,
                 )
             )
+    
+    def cv_squared(self, x):
+        eps = 1e-10
+        if x.shape[0] == 1:
+            return torch.tensor([0], device=x.device, dtype=x.dtype)
+        return x.float().var() / (x.float().mean() ** 2 + eps)
 
-    def forward(self, x, freqs_cis_list, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, freqs_cis_list, attn_mask=None, tau=None, delta=None, loss_coef=1e-2):
         # queries, keys, values [B, T, H, W, D]
         B, T, H, W, D = x.shape
 
         # gating
-        gates = self.gate_layer(x, training=self.training) # [B, Ps]
+        gates, load = self.gate_layer(x, training=self.training) # [B, Ps]
+
+        # calculate balance loss
+        importance = gates.sum(0)
+        balance_loss = self.cv_squared(importance) + self.cv_squared(load)
+        balance_loss *= loss_coef
 
         # dispatch
         xs = dispatch(x, gates) # Ps * [B, T, H, W, D]
-
+        
         # multi-branch attention
         # attns = []
-        # for i, (x_item, freqs_cis, attention_layer) in enumerate(zip(xs, freqs_cis_list, self.attention_layers)):
-        #     x_item, attn = attention_layer(x_item, x_item, x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)
+        # for i, (x_item, attention_layer) in enumerate(zip(xs, self.attention_layers)):
+        #     x_item, attn = attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)
         #     xs[i] = x_item
         #     attns.append(attn)
-        xs = [attention_layer(x_item, x_item, x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, freqs_cis, attention_layer in zip(xs, freqs_cis_list, self.attention_layers)]
+        xs = [attention_layer(x_item, x_item, x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
         attns = None
 
         # combine
         x = combine(xs, gates)
 
-        return x, attns
+        return x, attns, balance_loss
 
 
 class WindowAttentionLayer(nn.Module):
@@ -650,13 +661,13 @@ class MSPSTTEncoderLayer(nn.Module):
         self.pre_norm = pre_norm # pre-norm or post-norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
 
-    def forward_parallel(self, x, attn_mask=None, tau=None, delta=None):
+    def forward_parallel(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x_t = self.norm_attn_t(x)
         else:
             x_t = x
-        x_t, attn_t = self.attention_t(x_t)
+        x_t, attn_t, balance_loss = self.attention_t(x_t, freq_cis_list)
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
             x_t = self.norm_attn_t(x_t)
@@ -698,11 +709,11 @@ class MSPSTTEncoderLayer(nn.Module):
 
         return x, (attn_t, attn_s)
 
-    def forward_serial(self, x, attn_mask=None, tau=None, delta=None):
+    def forward_serial(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x = self.norm_attn_t(x)
-        x, attn_t = self.attention_t(x)
+        x, attn_t, balance_loss = self.attention_t(x, freq_cis_list)
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_attn_t(x)
@@ -733,15 +744,15 @@ class MSPSTTEncoderLayer(nn.Module):
 
         return x, (attn_t, attn_s)
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
         # parallel
         if self.parallelize:
-            return self.forward_parallel(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_parallel(x, freq_cis_list, attn_mask=attn_mask, tau=tau, delta=delta)
 
         # serial
         else:
-            return self.forward_serial(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            return self.forward_serial(x, freq_cis_list, attn_mask=attn_mask, tau=tau, delta=delta)
 
 
 class MSPSTTEncoder(nn.Module):
@@ -759,16 +770,18 @@ class MSPSTTEncoder(nn.Module):
         self.encoder_layers = nn.ModuleList(encoder_layers)
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, freq_cis_list, attn_mask=None, tau=None, delta=None):
         attns = []
+        balance_loss = 0.
         for encoder_layer in self.encoder_layers:
-            x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x, attn, aux_loss = encoder_layer(x, freq_cis_list, attn_mask=attn_mask, tau=tau, delta=delta)
             attns.append(attn)
+            balance_loss += aux_loss
 
         if self.norm is not None:
             x = self.norm(x)
 
-        return x, attns
+        return x, attns, balance_loss
 
 
 class MSPSTTDecoderLayer(nn.Module):
@@ -813,13 +826,13 @@ class MSPSTTDecoderLayer(nn.Module):
         self.pre_norm = pre_norm # pre-norm or post-norm
         self.parallelize = parallelize # parallelize spatial attention and temporal attention
 
-    def forward_parallel(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
+    def forward_parallel(self, x, cross, freq_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x_t = self.norm_sa_t(x)
         else:
             x_t = x
-        x_t, self_attn_t = self.self_attention_t(x_t, x_t, x_t) # Temporal Self-Attention
+        x_t, self_attn_t = self.self_attention_t(x_t, x_t, x_t, freq_cis) # Temporal Self-Attention
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
             x_t = self.norm_sa_t(x_t)
@@ -847,7 +860,7 @@ class MSPSTTDecoderLayer(nn.Module):
         if self.pre_norm:
             x_t = self.norm_ca_t(x)
             cross = self.norm_cross(cross)
-        x_t, cross_attn_t = self.cross_attention_t(x_t, cross, cross) # Temporal Cross-Attention
+        x_t, cross_attn_t = self.cross_attention_t(x_t, cross, cross, freq_cis) # Temporal Cross-Attention
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
             x_t = self.norm_ca_t(x_t)
@@ -872,11 +885,11 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
-    def forward_serial(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
+    def forward_serial(self, x, cross, freq_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
         res = x
         if self.pre_norm:
             x = self.norm_sa_t(x)
-        x, self_attn_t = self.self_attention_t(x, x, x) # Temporal Self-Attention
+        x, self_attn_t = self.self_attention_t(x, x, x, freq_cis) # Temporal Self-Attention
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_sa_t(x)
@@ -893,7 +906,7 @@ class MSPSTTDecoderLayer(nn.Module):
         if self.pre_norm:
             x = self.norm_ca_t(x)
             cross = self.norm_cross(cross)
-        x, cross_attn_t = self.cross_attention_t(x, cross, cross) # Temporal Cross-Attention
+        x, cross_attn_t = self.cross_attention_t(x, cross, cross, freq_cis) # Temporal Cross-Attention
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_ca_t(x)
@@ -916,15 +929,15 @@ class MSPSTTDecoderLayer(nn.Module):
 
         return x
 
-    def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
+    def forward(self, x, cross, freq_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
         # x [B, T, H, W, D]
         # parallel
         if self.parallelize:
-            return self.forward_parallel(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+            return self.forward_parallel(x, cross, freq_cis, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
         # serial
         else:
-            return self.forward_serial(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+            return self.forward_serial(x, cross, freq_cis, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
 
 class MSPSTTDecoder(nn.Module):
@@ -944,9 +957,9 @@ class MSPSTTDecoder(nn.Module):
         self.norm = norm_layer
         self.projection = projection
 
-    def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
+    def forward(self, x, cross, freq_cis, x_mask=None, cross_mask=None, tau=None, delta=None):
         for decoder_layer in self.decoder_layers:
-            x = decoder_layer(x, cross, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
+            x = decoder_layer(x, cross, freq_cis, x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
 
         if self.norm is not None:
             x = self.norm(x)
@@ -1269,8 +1282,8 @@ class Model(nn.Module):
         dec_out = self.dec_embedding(x_dec, x_mark_dec) # -> [B, S, H', W', D]
         # encoder
         freqs_cis_list = [getattr(self, f"freqs_cis_{segment_size}") for segment_size in self.segment_sizes]
-        enc_out, _ = self.encoder(enc_out, freqs_cis_list) # -> [B, T, H', W', D]
+        enc_out, _, balance_loss = self.encoder(enc_out, freqs_cis_list) # -> [B, T, H', W', D]
         # decoder
         freqs_cis = getattr(self, "freqs_cis")
         dec_out = self.decoder(dec_out, enc_out, freqs_cis) # -> [B, S, H', W', D]
-        return dec_out, None
+        return dec_out, balance_loss

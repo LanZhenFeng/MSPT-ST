@@ -355,12 +355,23 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
                 )
             )
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def cv_squared(self, x):
+        eps = 1e-10
+        if x.shape[0] == 1:
+            return torch.tensor([0], device=x.device, dtype=x.dtype)
+        return x.float().var() / (x.float().mean() ** 2 + eps)
+
+    def forward(self, x, attn_mask=None, tau=None, delta=None, loss_coef=1e-2):
         # queries, keys, values [B, T, H, W, D]
         B, T, H, W, D = x.shape
 
         # gating
-        gates = self.gate_layer(x, training=self.training) # [B, Ps]
+        gates, load = self.gate_layer(x, training=self.training) # [B, Ps]
+
+        # calculate balance loss
+        importance = gates.sum(0)
+        balance_loss = self.cv_squared(importance) + self.cv_squared(load)
+        balance_loss *= loss_coef
 
         # dispatch
         xs = dispatch(x, gates) # Ps * [B, T, H, W, D]
@@ -377,7 +388,7 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         # combine
         x = combine(xs, gates)
 
-        return x, attns
+        return x, attns, balance_loss
 
 
 class WindowAttentionLayer(nn.Module):
@@ -561,7 +572,7 @@ class MSPSTTEncoderLayer(nn.Module):
             x_t = self.norm_attn_t(x)
         else:
             x_t = x
-        x_t, attn_t = self.attention_t(x_t)
+        x_t, attn_t, balance_loss = self.attention_t(x_t)
         x_t = res + self.dropout(x_t)
         if not self.pre_norm:
             x_t = self.norm_attn_t(x_t)
@@ -607,7 +618,7 @@ class MSPSTTEncoderLayer(nn.Module):
         res = x
         if self.pre_norm:
             x = self.norm_attn_t(x)
-        x, attn_t = self.attention_t(x)
+        x, attn_t, balance_loss = self.attention_t(x)
         x = res + self.dropout(x)
         if not self.pre_norm:
             x = self.norm_attn_t(x)
@@ -666,14 +677,16 @@ class MSPSTTEncoder(nn.Module):
 
     def forward(self, x, attn_mask=None, tau=None, delta=None):
         attns = []
+        balance_loss = 0.
         for encoder_layer in self.encoder_layers:
-            x, attn = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x, attn, aux_loss = encoder_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
             attns.append(attn)
+            balance_loss += aux_loss
 
         if self.norm is not None:
             x = self.norm(x)
 
-        return x, attns
+        return x, attns, balance_loss
 
 
 class MSPSTTDecoderLayer(nn.Module):
@@ -1209,7 +1222,8 @@ class Model(nn.Module):
         enc_out = self.enc_embedding(x_enc, x_mark_enc) # -> [B, T, H', W', D]
         dec_out = self.dec_embedding(x_dec, x_mark_dec) # -> [B, S, H', W', D]
         # encoder
-        enc_out, _ = self.encoder(enc_out) # -> [B, T, H', W', D]
+        enc_out, _, balance_loss = self.encoder(enc_out) # -> [B, T, H', W', D]
         # decoder
         dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
-        return dec_out, None
+        print(balance_loss)
+        return dec_out, balance_loss
