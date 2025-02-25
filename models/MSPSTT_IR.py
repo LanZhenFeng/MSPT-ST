@@ -1267,7 +1267,7 @@ class Model(nn.Module):
             self.register_buffer(f"freqs_cis_{segment_size}", precompute_freqs_cis(dim, num_segments), persistent=False)
 
         # rotary position encoding for decoder
-        self.register_buffer("freqs_cis", precompute_freqs_cis(configs.d_model, max([configs.seq_len,  configs.label_len + configs.pred_len]), persistent=False))
+        self.register_buffer("freqs_cis", precompute_freqs_cis(configs.d_model, max([configs.seq_len,  configs.label_len + configs.pred_len])), persistent=False)
 
     def get_segment_sizes(self, seq_len):
         peroid_list = 1 / torch.fft.rfftfreq(seq_len)[1:]
