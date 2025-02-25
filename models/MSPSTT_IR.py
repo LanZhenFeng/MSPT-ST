@@ -223,7 +223,7 @@ class TemporalAttentionLayer(nn.Module):
         queries, keys, values = self.q_proj(queries), self.k_proj(keys), self.v_proj(values)
         # rotary embedding
         queries, keys = apply_rotary_emb(queries, keys, freqs_cis)
-        queries, keys, values = map(lambda x: rearrange(x, 'b t (n d) -> b t n d', n=self.n_heads), (queries, keys, values))
+        queries, keys, values = map(lambda x: rearrange(x, 'b t (n d) -> b n t d', n=self.n_heads), (queries, keys, values))
         queries, keys = self.q_norm(queries), self.k_norm(keys)
 
         # attention
@@ -473,11 +473,11 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         
         # multi-branch attention
         # attns = []
-        # for i, (x_item, attention_layer) in enumerate(zip(xs, self.attention_layers)):
-        #     x_item, attn = attention_layer(x_item, attn_mask=attn_mask, tau=tau, delta=delta)
+        # for i, (x_item, freqs_cis, attention_layer) in enumerate(zip(xs, freqs_cis_list, self.attention_layers)):
+        #     x_item, attn = attention_layer(x_item, x_item, x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)
         #     xs[i] = x_item
         #     attns.append(attn)
-        xs = [attention_layer(x_item, x_item, x_item, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, attention_layer in zip(xs, self.attention_layers)]
+        xs = [attention_layer(x_item, x_item, x_item, freqs_cis, attn_mask=attn_mask, tau=tau, delta=delta)[0] for x_item, freqs_cis, attention_layer in zip(xs, freqs_cis_list, self.attention_layers)]
         attns = None
 
         # combine
@@ -705,7 +705,7 @@ class MSPSTTEncoderLayer(nn.Module):
         # x = x_t * x_s
         # linear
         # x = self.linear(torch.cat([x_t, x_s], dim=-1))
-        x = self.concat(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+        x = self.concat(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 * x_s)], dim=-1))
 
         return x, (attn_t, attn_s), balance_loss
 
@@ -854,7 +854,7 @@ class MSPSTTDecoderLayer(nn.Module):
         # x = x_t * x_s
         # linear
         # x = self.self_reduction(torch.cat([x_t, x_s], dim=-1))
-        x = self.concat_s(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+        x = self.concat_s(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 * x_s)], dim=-1))
 
         res = x
         if self.pre_norm:
@@ -873,7 +873,7 @@ class MSPSTTDecoderLayer(nn.Module):
         if not self.pre_norm:
             x_s = self.norm_ca_s(x_s)
 
-        x = self.concat_c(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+        x = self.concat_c(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 * x_s)], dim=-1))
 
         res = x
         if self.pre_norm:

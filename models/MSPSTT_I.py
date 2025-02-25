@@ -130,7 +130,7 @@ class TemporalAttentionLayer(nn.Module):
 
         # qkv projection and reshape
         queries, keys, values = self.q_proj(queries), self.k_proj(keys), self.v_proj(values)
-        queries, keys, values = map(lambda x: rearrange(x, 'b t h w (n d) -> (b h w) t n d', n=self.n_heads), (queries, keys, values))
+        queries, keys, values = map(lambda x: rearrange(x, 'b t h w (n d) -> (b h w) n t d', n=self.n_heads), (queries, keys, values))
         queries, keys = self.q_norm(queries), self.k_norm(keys)
 
         # attention
@@ -610,7 +610,7 @@ class MSPSTTEncoderLayer(nn.Module):
         # x = x_t * x_s
         # linear
         # x = self.linear(torch.cat([x_t, x_s], dim=-1))
-        x = self.concat(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+        x = self.concat(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 *x_s)], dim=-1))
 
         return x, (attn_t, attn_s), balance_loss
 
@@ -759,7 +759,7 @@ class MSPSTTDecoderLayer(nn.Module):
         # x = x_t * x_s
         # linear
         # x = self.self_reduction(torch.cat([x_t, x_s], dim=-1))
-        x = self.concat_s(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+        x = self.concat_s(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 *x_s)], dim=-1))
 
         res = x
         if self.pre_norm:
@@ -778,7 +778,7 @@ class MSPSTTDecoderLayer(nn.Module):
         if not self.pre_norm:
             x_s = self.norm_ca_s(x_s)
 
-        x = self.concat_c(torch.cat([x_t + x_s, x_t * x_s], dim=-1))
+        x = self.concat_c(torch.cat([x_t + x_s, (0.1 * x_t) * (0.1 *x_s)], dim=-1))
 
         res = x
         if self.pre_norm:
@@ -911,7 +911,6 @@ class PatchRecovery_OneStep(nn.Module):
         self.embed_dim = embed_dim
         self.out_chans = out_chans
         self.proj = nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=patch_size, stride=patch_size)
-        self.pixel_shuffle = nn.PixelShuffle(upscale_factor=patch_size)
 
     def forward(self, x):
         # x [B, T, H, W, D]
@@ -1225,5 +1224,4 @@ class Model(nn.Module):
         enc_out, _, balance_loss = self.encoder(enc_out) # -> [B, T, H', W', D]
         # decoder
         dec_out = self.decoder(dec_out, enc_out) # -> [B, S, H', W', D]
-        print(balance_loss)
         return dec_out, balance_loss
