@@ -931,6 +931,7 @@ class PatchRecovery_StepByStep(nn.Module):
         kernel_size (int): Size of the kernel.
         stride (int): Stride of the transposed convolution.
         padding (int): Padding of the transposed convolution.
+        output_padding (int): Output padding of the transposed convolution.
     """
 
     def __init__(
@@ -941,6 +942,7 @@ class PatchRecovery_StepByStep(nn.Module):
             kernel_size: int = 3,
             stride: int = 2,
             padding: int = 1,
+            output_padding: int = 1
     ):
         super(PatchRecovery_StepByStep, self).__init__()
 
@@ -953,11 +955,11 @@ class PatchRecovery_StepByStep(nn.Module):
         self.Convs = nn.ModuleList()
         for i in range(num_layers):
             self.Convs.append(nn.Sequential(
-                nn.ConvTranspose2d(in_channels=embed_dim,out_channels=embed_dim, kernel_size=kernel_size, stride=stride, padding=padding),
+                nn.ConvTranspose2d(in_channels=embed_dim,out_channels=embed_dim, kernel_size=kernel_size, stride=stride, padding=padding, output_padding=output_padding),
                 LayerNorm2d(embed_dim),
                 nn.SiLU(inplace=True)
             ))
-        self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=kernel_size, stride=stride, padding=padding))
+        self.Convs.append(nn.ConvTranspose2d(in_channels=embed_dim, out_channels=out_chans, kernel_size=kernel_size, stride=stride, padding=padding, output_padding=output_padding))
 
     def forward(self, x):
         # x [B, T, H, W, D]
