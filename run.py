@@ -72,6 +72,9 @@ if __name__ == '__main__':
     parser.add_argument('--stride_scale', type=int, default=1, help='stride scale')
     parser.add_argument('--pre_norm', action='store_true', help='pre norm', default=False)
     parser.add_argument('--is_parallel', action='store_true', help='parallel spatio-temporal attention or not', default=False)
+    parser.add_argument('--use_conv', action='store_true', help='use conv in gate layer', default=False)
+    parser.add_argument('--use_linear', action='store_true', help='use linear in gate layer', default=False)
+    parser.add_argument('--is_rotary', action='store_true', help='use rotary position encoding', default=False)
 
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')

@@ -806,7 +806,7 @@ class MSPSTTDecoder(nn.Module):
     def forward(self, x, cross, x_mask=None, cross_mask=None, tau=None, delta=None):
         attns = []
         balance_loss = 0.
-        for i, decoder_layer, upsample_layer in enumerate(zip(self.decoder_layers, self.upsample_layer)):
+        for i, (decoder_layer, upsample_layer) in enumerate(zip(self.decoder_layers, self.upsample_layer)):
             x = upsample_layer(x)
             x, attn, aux_loss = decoder_layer(x, cross[-(i+1)], x_mask=x_mask, cross_mask=cross_mask, tau=tau, delta=delta)
             attns.append(attn)
