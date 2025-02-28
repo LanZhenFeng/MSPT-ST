@@ -374,7 +374,7 @@ class PeriodicAttentionLayer(nn.Module):
     def forward(self, queries, keys, values, freqs_cis=None, attn_mask=None):
         # x [B, T, H, W, D]
         if queries.shape[0] == 0:
-            return queries, None
+            return queries
 
         B, T, H, W, D = queries.shape
         # rearrange and segment
