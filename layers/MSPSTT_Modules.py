@@ -459,6 +459,36 @@ class MultiScalePeriodicAttentionLayer(nn.Module):
         return x, balance_loss
 
 
+class VisionTransformerAttentionLayer(nn.Module):
+    def __init__(
+            self,
+            attention: nn.Module = FullAttention,
+            d_model: int = 512,
+            n_heads: int = 8,
+            qkv_bias: bool = False,
+            qk_scale: float = None,
+            attn_drop: float = 0.,
+            proj_drop: float = 0.,
+    ):
+        super(VisionTransformerAttentionLayer, self).__init__()
+        self.inner_attention = attention
+
+    def forward(self, x, attn_mask=None):
+        # x [B, T, H, W, D]
+        B, T, H, W, D = x.shape
+
+        # reshape
+        x = rearrange(x, 'b t h w d -> (b t) h w d')
+
+        # attention
+        x = self.inner_attention(x, mask=attn_mask)
+
+        # reshape back
+        x = rearrange(x, '(b t) h w d -> b t h w d', b=B, t=T)
+
+        return x
+
+
 class WindowAttentionLayer(nn.Module):
     r"""Window Attention Layer of Swin Transformer. """
     def __init__(
