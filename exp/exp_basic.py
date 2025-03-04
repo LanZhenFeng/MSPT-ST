@@ -1,7 +1,7 @@
 import os
 import torch
 from models import MSPT, ConvLSTM, E3DLSTM, MAU, MIM, PhyDNet, PredRNN, PredRNNPP, PredRNNv2, SwinLSTM_B, SwinLSTM_D, SimVP, TAU, PredFormer
-from models import MSPSTT_I, MSPSTT_IR, MSPSTT_S, MSPSTT_SR, MSPSTT_T, MSPSTT_TR, MSPSTT_U, MSPSTT_UR, MSPSTT_IFD
+from models import MSPSTT_I, MSPSTT_IR, MSPSTT_S, MSPSTT_SR, MSPSTT_T, MSPSTT_TR, MSPSTT_U, MSPSTT_UR, MSPSTT_IFD, MSPSTT_IFDA, MSPSTT_IFDB, MSPSTT_IFDC
 
 class Exp_Basic(object):
     def __init__(self, args):
@@ -11,6 +11,9 @@ class Exp_Basic(object):
             'MSPSTT_I': MSPSTT_I,
             'MSPSTT_IR': MSPSTT_IR,
             'MSPSTT_IFD': MSPSTT_IFD,
+            'MSPSTT_IFDA': MSPSTT_IFDA,
+            'MSPSTT_IFDB': MSPSTT_IFDB,
+            'MSPSTT_IFDC': MSPSTT_IFDC,
             'MSPSTT_S': MSPSTT_S,
             'MSPSTT_SR': MSPSTT_SR,
             'MSPSTT_T': MSPSTT_T,
