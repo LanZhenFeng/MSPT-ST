@@ -240,14 +240,17 @@ class Gate(nn.Module):
         # convolutional layers
         if use_conv and not use_linear:
             self.conv = nn.Conv2d(in_channels=d_model, out_channels=d_model * 4, kernel_size=(height, width)) # [B, T, H, W, D] -> [B, T, 1, 1, D*4]
+            self.norm = LayerNorm2d(d_model * 4)
             self.conv_drop = nn.Dropout(dropout)
 
         if use_linear and not use_conv:
             self.linear = nn.Linear(height * width * d_model, d_model * 4)
+            self.norm = nn.LayerNorm(d_model * 4)
             self.linear_drop = nn.Dropout(dropout)
 
         if not use_conv and not use_linear:
             self.pool = nn.AdaptiveAvgPool2d((1, 1)) # [B, T, H, W, D] -> [B, T, 1, 1, D]
+            self.norm = nn.LayerNorm(d_model)
 
         # Noise parameters
         self.w_gate = nn.Parameter(torch.zeros(self.num_freqs, len(self.segment_sizes)))
@@ -290,14 +293,17 @@ class Gate(nn.Module):
         x = rearrange(x, 'b t h w d -> (b t) d h w')
         if hasattr(self, 'conv'):
             x = self.conv(x)
+            x = self.norm(x)
             x = self.conv_drop(x)
             x = x.flatten(1)
         elif hasattr(self, 'linear'):
             x = x.flatten(1)
             x = self.linear(x)
+            x = self.norm(x)
             x = self.linear_drop(x)
         else:
             x = self.pool(x).flatten(1)
+            x = self.norm(x)
         x = rearrange(x, '(b t) d -> b t d', t=T)
 
         # fft
